@@ -217,7 +217,24 @@ fn handle(mut stream: TcpStream) -> std::io::Result<()> {
             (
                 "200 OK",
                 "application/json; charset=utf-8",
-                api::plan_json(&policy, &host, &bad),
+                api::plan_json(&policy, &host, &bad, &api::apply_command(query)),
+            )
+        }
+        "/api/status" => {
+            let st = tl_policy::apply::status(&tl_policy::apply::Options::default());
+            (
+                "200 OK",
+                "application/json; charset=utf-8",
+                format!(
+                    "{{\"text\":\"{}\",\"recorded\":{},\"table\":{},\"routing\":{},\
+                     \"countdown\":{},\"baselineFlushes\":{}}}",
+                    api::esc(&st.describe()),
+                    st.recorded,
+                    st.table_present,
+                    st.rules_present,
+                    st.deadman_armed,
+                    tl_policy::apply::baseline_flushes(Path::new("/etc/nftables.conf")),
+                ),
             )
         }
         _ => (

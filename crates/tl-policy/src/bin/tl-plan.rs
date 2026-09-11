@@ -41,6 +41,19 @@ Overrides, for compiling against a host that is not this one:
 
   --ip                        also print the ip commands, commented
   --force                     print the ruleset even if it must not be applied
+
+Changing the machine (needs root):
+  --apply                     put the plan into the kernel
+  --deadman <secs>            undo it automatically unless confirmed (default 120)
+  --verify <host:port>        after applying, open a NEW connection there; if it
+                              fails, undo immediately. An EXISTING session
+                              surviving proves nothing -- every open flow is
+                              excluded by construction.
+  --confirm                   keep what is applied; cancel the countdown
+  --revert                    undo whatever is applied
+  --status                    say what is actually in the kernel right now
+  --dry-run                   print the commands instead of running them
+  --netns <name>              do all of it inside a network namespace
 ";
 
 fn main() -> ExitCode {
@@ -67,6 +80,8 @@ fn main() -> ExitCode {
     let mut policy = Policy::default();
     let mut show_ip = false;
     let mut force = false;
+    let mut opts = tl_policy::apply::Options::default();
+    let mut verb = "";
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -82,6 +97,20 @@ fn main() -> ExitCode {
             "--bare" => {}
             "--ip" => show_ip = true,
             "--force" => force = true,
+            "--apply" | "--revert" | "--confirm" | "--status" => verb = arg,
+            "--dry-run" => opts.dry_run = true,
+            "--deadman" => match val().and_then(|v| v.parse().ok()) {
+                Some(n) => opts.deadman_secs = n,
+                None => return bad("not a number of seconds", arg),
+            },
+            "--verify" => match val() {
+                Some(v) => opts.verify = Some(v),
+                None => return bad("missing value", arg),
+            },
+            "--netns" => match val() {
+                Some(v) => opts.netns = Some(v),
+                None => return bad("missing value", arg),
+            },
             "--default" => match val().as_deref().and_then(parse_path) {
                 Some(p) => policy.default_path = p,
                 None => return bad("not a path", arg),
@@ -131,6 +160,53 @@ fn main() -> ExitCode {
         i += 1;
     }
 
+    // Verbs that read or undo do not need a policy at all.
+    match verb {
+        "--status" => {
+            let st = tl_policy::apply::status(&opts);
+            println!("{}", st.describe());
+            println!(
+                "  record={} table={} routing={} countdown={}",
+                st.recorded, st.table_present, st.rules_present, st.deadman_armed
+            );
+            if tl_policy::apply::baseline_flushes(std::path::Path::new("/etc/nftables.conf")) {
+                println!(
+                    "  note: /etc/nftables.conf flushes the ruleset, so reloading the \
+                     baseline firewall will silently remove this policy while leaving \
+                     the routing half in place."
+                );
+            }
+            return ExitCode::SUCCESS;
+        }
+        "--revert" => {
+            return match tl_policy::apply::revert(&opts) {
+                Ok(a) => {
+                    for c in &a.revert {
+                        eprintln!("undone: {c}");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("tl-plan: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        "--confirm" => {
+            return match tl_policy::apply::confirm(&opts) {
+                Ok(_) => {
+                    eprintln!("kept. The countdown is cancelled.");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("tl-plan: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        _ => {}
+    }
+
     let plan = policy.compile(&host);
     let refusals = plan.preflight(&policy, &host);
     for r in &refusals {
@@ -145,6 +221,33 @@ fn main() -> ExitCode {
              Fix the above, or pass --force to see it anyway."
         );
         return ExitCode::FAILURE;
+    }
+
+    if verb == "--apply" {
+        return match tl_policy::apply::apply(&policy, &host, &plan, &opts) {
+            Ok(a) if opts.dry_run => {
+                let _ = a;
+                ExitCode::SUCCESS
+            }
+            Ok(a) => {
+                if a.deadman {
+                    eprintln!(
+                        "applied. It will undo itself in {}s unless you run --confirm.\n\
+                         Before you do: open a NEW connection and check it works. An \
+                         existing session still working proves nothing -- every flow \
+                         that was already open is excluded by construction.",
+                        opts.deadman_secs
+                    );
+                } else {
+                    eprintln!("applied, with NO countdown. Nothing will undo this for you.");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("tl-plan: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     print!("{}", plan.nft);

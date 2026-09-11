@@ -351,11 +351,24 @@
       <pre id="ipcmds"></pre>
       <pre id="torrc"></pre>
     </details>
-    <p style="margin-top:.6rem">
-      <button class="btn" id="apply" disabled>Apply</button>
+  </div>
+
+  <div class="card" id="applycard">
+    <h3><svg class="ic" viewBox="0 0 24 24"><use href="#i-shield"/></svg> Apply it</h3>
+    <p id="applywhy"></p>
+    <pre id="applycmd"></pre>
+    <p class="toolbar">
+      <button class="btn" id="copy" type="button">Copy the command</button>
       <button class="btn" id="reset" type="button">Start over</button>
-      <span class="sub" id="applywhy"></span>
+      <span class="sub" id="copied" aria-live="polite"></span>
     </p>
+    <p>It undoes itself after two minutes unless you run
+       <code>sudo tl-plan --confirm</code>. Before you confirm, open a
+       <strong>new</strong> connection and check it works — an existing
+       session still working proves nothing, because every connection that
+       was already open is excluded on purpose.</p>
+    <p>Right now: <strong id="applied">checking…</strong></p>
+    <p class="sub" id="flushwarn" hidden></p>
   </div>
 </section>
 
@@ -976,10 +989,14 @@ async function refreshPlan(){
     const ul = $('stop-list'); ul.replaceChildren();
     for (const p of problems) ul.appendChild(el('li', null, p));
     for (const n of (plan.notes || [])) ul.appendChild(el('li','muted', n));
-    $('apply').disabled = true;
+    $('applycmd').textContent = plan.command || '';
+    $('copy').disabled = !plan.applyable;
+    $('applycard').classList.toggle('stop', !plan.applyable);
     $('applywhy').textContent = plan.applyable
-      ? 'nothing is applied from this screen yet — this build only produces the rules'
-      : 'fix the problems above first';
+      ? 'Run this in a terminal. The page does not do it for you: this server '
+        + 'reads every process on the machine, so it runs as root, and a routing '
+        + 'change that a web page could trigger is a different risk entirely.'
+      : 'Fix the problems above first — the command is not ready.';
   } catch (e) {
     $('stop').hidden = false;
     $('stop-list').replaceChildren(el('li', null, 'could not build a plan: ' + e.message));
@@ -1046,6 +1063,38 @@ loadHost(true);
 setInterval(() => { if (!$('view-route').hidden) loadHost(false); }, 9000);
 
 $('search').addEventListener('input', e => { R.filter = e.target.value; paintBoard(); });
+$('copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('applycmd').textContent);
+    $('copied').textContent = 'copied';
+  } catch {
+    // Clipboard access is refused in plenty of contexts. Select it
+    // instead, so the button still does something useful.
+    const r = document.createRange();
+    r.selectNodeContents($('applycmd'));
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    $('copied').textContent = 'selected — press Ctrl+C';
+  }
+  setTimeout(() => { $('copied').textContent = ''; }, 2500);
+});
+
+async function refreshApplied(){
+  try {
+    const r = await fetch('/api/status', {cache:'no-store'});
+    const st = await r.json();
+    $('applied').textContent = st.text;
+    const warn = $('flushwarn');
+    warn.hidden = !st.baselineFlushes;
+    if (st.baselineFlushes)
+      warn.textContent = 'Note: this host\u2019s /etc/nftables.conf flushes the ruleset, '
+        + 'so reloading the baseline firewall would silently remove the policy while '
+        + 'leaving the routing half of it in place. Check here after any firewall reload.';
+  } catch { $('applied').textContent = 'could not read'; }
+}
+refreshApplied();
+setInterval(() => { if (!$('view-route').hidden) refreshApplied(); }, 9000);
+
 $('reset').addEventListener('click', () => {
   R.placed = {}; R.sel = null; R.filter = ''; R.dflt = 'direct';
   $('search').value = ''; $('dflt').value = 'direct';

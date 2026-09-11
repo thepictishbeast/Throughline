@@ -142,6 +142,24 @@ for (const [w, h, tag] of [[1600,1000,'wide'], [900,1100,'narrow'], [420,900,'ph
     check(icons.count > 0 && icons.bad.length === 0,
       `route: ${icons.count} icons all resolve (${icons.bad.length} broken)`);
 
+    // The command on the screen must BE the policy on the screen.
+    const cmd = await p.evaluate(() => {
+      R.placed = {'system.slice/nginx.service': 'tor'};
+      R.dflt = 'direct';
+      paintBoard();
+      return refreshPlan().then(() => ({
+        text: document.getElementById('applycmd').textContent,
+        applied: document.getElementById('applied').textContent,
+        copyEnabled: !document.getElementById('copy').disabled,
+      }));
+    });
+    check(cmd.text.includes("--rule 'cgroup:system.slice/nginx.service=tor'"),
+      'route: the apply command carries the policy shown');
+    check(cmd.text.includes('--deadman'), 'route: the command arms the countdown');
+    check(cmd.applied.length > 0 && cmd.applied !== 'checking…',
+      `route: what is applied is read back (${cmd.applied.slice(0, 40)})`);
+    await p.evaluate(() => { document.getElementById('reset').click(); });
+
     await p.screenshot({ path: `${out}-route.png` });
     await p.click('#tab-observe');
     await p.waitForTimeout(200);

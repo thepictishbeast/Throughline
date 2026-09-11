@@ -59,7 +59,42 @@ says in one sentence what the box means, shows the path the traffic would
 take in plain words, and lists anything that would stop it working. If
 you want the exact firewall rules, there is an expander for that.
 
-Nothing is applied. This build produces the rules and shows them to you.
+The page does not apply it for you — it gives you the command to run. See
+**[Applying it](#applying-it)**.
+
+## Applying it
+
+```
+sudo tl-plan --default direct \
+    --rule cgroup:system.slice/firefox.service=tor \
+    --admin 203.0.113.7 \
+    --apply --deadman 120
+```
+
+Then, within two minutes:
+
+```
+sudo tl-plan --confirm     # keep it
+sudo tl-plan --revert      # take it back out
+sudo tl-plan --status      # what is actually in the kernel right now
+```
+
+**If you do not confirm, it undoes itself.** The countdown is held by
+systemd, not by the program that applied it — a timer inside that process
+would be killed by the very event it exists to detect, because breaking
+your own connection tears down your session and everything in it.
+
+**Before you confirm, open a NEW connection and check it works.** Your
+existing SSH session still working proves nothing at all: every
+connection that was already open is excluded on purpose, so it survives
+whether the policy is right or catastrophic. `--verify host:port` makes
+the tool do this for you and undo immediately if it fails.
+
+The page does not apply anything itself. This server reads every
+process's sockets, so it runs as root; a routing change reachable from a
+web request is a different proposition, and a browser can be induced to
+treat a loopback server as same-origin. Reading earns that risk behind a
+`Host` check. Rewriting the machine's routing does not.
 
 ## Is this safe to run?
 
@@ -362,8 +397,13 @@ to the real one.
 
 ## Not built yet
 
-* applying a plan (this build only produces it)
 * drag-and-drop editing of the topology diagram itself
+* applying from the browser (deliberate — see above)
+* anything about the far side of a tunnel: whether your provider leaks,
+  what a real Tor guard sees, whether the egress address is what you
+  think. The namespace suite proves the kernel does what the generated
+  text says; it cannot prove the text says the right thing about a
+  network it has never seen.
 * RiseupVPN / ProtonVPN integration
 * the hops beyond the NIC — ISP, VPN egress, Tor exit — which cannot be
   read from `/proc` and need active probing

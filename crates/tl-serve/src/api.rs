@@ -192,9 +192,39 @@ pub fn host_json(
     )
 }
 
+/// The command that would apply this plan, exactly as it must be typed.
+///
+/// The browser does not apply anything. This server runs as root so that
+/// it can read every process's sockets, and a routing change reachable
+/// from a web request is a different thing entirely — a page in a browser
+/// that was told an attacker's name resolves to 127.0.0.1 is same-origin
+/// with it. Reading is worth that risk with a Host check in front of it;
+/// rewriting the machine's routing is not.
+///
+/// So the screen produces the command and a person runs it. Nothing is
+/// lost: it is the same compiler, and `--status` reads back into the same
+/// page.
+#[must_use]
+pub fn apply_command(query: &str) -> String {
+    let mut cmd = vec!["sudo tl-plan".to_owned()];
+    let mut rules = Vec::new();
+    for (k, v) in params(query) {
+        match k.as_str() {
+            "default" => cmd.push(format!("--default {v}")),
+            "rule" => rules.push(format!("--rule '{v}'")),
+            "admin" if !v.is_empty() => cmd.push(format!("--admin {v}")),
+            "endpoint" if !v.is_empty() => cmd.push(format!("--endpoint {v}")),
+            _ => {}
+        }
+    }
+    cmd.extend(rules);
+    cmd.push("--apply --deadman 120".to_owned());
+    cmd.join(" \\\n    ")
+}
+
 /// A compiled plan plus everything wrong with it.
 #[must_use]
-pub fn plan_json(policy: &Policy, host: &Host, bad: &[String]) -> String {
+pub fn plan_json(policy: &Policy, host: &Host, bad: &[String], command: &str) -> String {
     let plan = policy.compile(host);
     let refusals: Vec<String> = plan
         .preflight(policy, host)
@@ -208,7 +238,7 @@ pub fn plan_json(policy: &Policy, host: &Host, bad: &[String]) -> String {
         .collect();
     format!(
         "{{\"nft\":\"{}\",\"ip\":{},\"torrc\":{},\"notes\":{},\"refusals\":{},\
-         \"malformed\":{},\"marks\":[{}],\"applyable\":{}}}",
+         \"malformed\":{},\"marks\":[{}],\"applyable\":{},\"revert\":{},\"command\":\"{}\"}}",
         esc(&plan.nft),
         arr(plan.ip.iter().cloned()),
         arr(plan.torrc.iter().cloned()),
@@ -216,7 +246,9 @@ pub fn plan_json(policy: &Policy, host: &Host, bad: &[String]) -> String {
         arr(refusals.iter().cloned()),
         arr(bad.iter().cloned()),
         marks.join(","),
-        refusals.is_empty() && bad.is_empty()
+        refusals.is_empty() && bad.is_empty(),
+        arr(plan.revert.iter().cloned()),
+        esc(command),
     )
 }
 
@@ -311,16 +343,31 @@ mod tests {
     }
 
     #[test]
+    fn the_apply_command_carries_every_part_of_the_policy() {
+        // If the command the screen shows is not the policy the screen
+        // shows, the person running it applies something else.
+        let c = apply_command(
+            "default=tor&rule=uid%3A1000=vpn%3Awg0&rule=unit%3Anginx.service=direct&admin=203.0.113.7",
+        );
+        assert!(c.contains("--default tor"), "{c}");
+        assert!(c.contains("--rule 'uid:1000=vpn:wg0'"), "{c}");
+        assert!(c.contains("--rule 'unit:nginx.service=direct'"), "{c}");
+        assert!(c.contains("--admin 203.0.113.7"), "{c}");
+        assert!(c.contains("--apply"), "{c}");
+        assert!(c.contains("--deadman 120"), "the countdown is not optional: {c}");
+    }
+
+    #[test]
     fn a_plan_that_cannot_be_applied_says_so_and_says_why() {
         let (p, h, bad) = policy_from_query("default=tor&admin=203.0.113.7", host());
-        let j = plan_json(&p, &h, &bad);
+        let j = plan_json(&p, &h, &bad, "");
         assert!(j.contains("\"applyable\":true"), "{j}");
 
         // The same policy on a host whose Tor has no transparent port.
         let mut bare = host();
         bare.tor_trans_port = None;
         let (p2, h2, bad2) = policy_from_query("default=tor&admin=203.0.113.7", bare);
-        let j2 = plan_json(&p2, &h2, &bad2);
+        let j2 = plan_json(&p2, &h2, &bad2, "");
         assert!(j2.contains("\"applyable\":false"), "{j2}");
         assert!(j2.contains("TransPort"), "{j2}");
     }
@@ -330,7 +377,7 @@ mod tests {
         // A cgroup name comes from the filesystem and a unit name from a
         // request. Either could carry a quote and blank the whole view.
         let (p, h, _) = policy_from_query("rule=unit:evil%22name.service=tor", host());
-        let j = plan_json(&p, &h, &[]);
+        let j = plan_json(&p, &h, &[], "");
         assert!(!j.contains("evil\"name"), "unescaped quote reached the UI");
         assert!(j.contains("evil\\\"name") || j.contains("evil%22name"), "{j}");
     }

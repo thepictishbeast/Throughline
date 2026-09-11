@@ -45,6 +45,9 @@ command -v nft >/dev/null || die "no nft(8)"
 
 # ---------------------------------------------------------------- teardown
 teardown(){
+  systemctl stop throughline-revert-tl-app.timer 2>/dev/null
+  systemctl reset-failed throughline-revert-tl-app 2>/dev/null
+  rm -f /run/throughline/applied.tl-app
   for n in tl-app tl-isp tl-vpn; do ip netns del "$n" 2>/dev/null; done
   for d in "$CG_ROOT"/app "$CG_ROOT"/other "$CG_ROOT"; do rmdir "$d" 2>/dev/null; done
 }
@@ -254,11 +257,76 @@ check "no fwmark rules left"                      0 "$r"
 check "traffic is back to normal"                 ISP "$(ask app)"
 
 # -------------------------------------------------------------------------
+# Everything above proves the RULES route. These prove the tool can put
+# them into a kernel and take them out again without stranding anybody.
+echo
+echo "-- applying through the tool, not by hand"
+APPLY=(--bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2
+       --cgroup tl-test/app --rule cgroup:tl-test/app=vpn:tl-w0 --default direct
+       --netns tl-app)
+"$PLAN" "${APPLY[@]}" --apply --deadman 0 >/dev/null 2>&1
+check "tl-plan --apply routes the selected program" VPN "$(ask app)"
+check "and leaves the others alone"                 ISP "$(ask other)"
+check "--status agrees with the kernel"             "applied and confirmed" \
+      "$("$PLAN" --netns tl-app --status 2>/dev/null | head -1)"
+
+echo
+echo "-- the countdown, and confirming it"
+"$PLAN" "${APPLY[@]}" --apply --deadman 90 >/dev/null 2>&1
+check "--status reports a countdown" "applied, and reverting shortly unless confirmed" \
+      "$("$PLAN" --netns tl-app --status 2>/dev/null | head -1)"
+"$PLAN" --netns tl-app --confirm >/dev/null 2>&1
+check "--confirm cancels it"          "applied and confirmed" \
+      "$("$PLAN" --netns tl-app --status 2>/dev/null | head -1)"
+check "and the policy is still routing" VPN "$(ask app)"
+
+echo
+echo "-- the dead-man switch actually fires"
+"$PLAN" "${APPLY[@]}" --apply --deadman 5 >/dev/null 2>&1
+check "applied, counting down"        VPN "$(ask app)"
+sleep 9
+check "it undid itself without being asked" ISP "$(ask app)"
+check "and said so"                   "a record exists but nothing is applied; it was probably reverted by hand." \
+      "$("$PLAN" --netns tl-app --status 2>/dev/null | head -1)"
+"$PLAN" --netns tl-app --revert >/dev/null 2>&1
+
+echo
+echo "-- a plan that does not work undoes itself immediately"
+# 10.9.9.9 is reachable, 10.9.9.250 is not: the tunnel end has no such
+# address, so the new connection fails and the policy must come straight
+# back out rather than wait for a countdown.
+"$PLAN" "${APPLY[@]}" --apply --deadman 60 --verify 10.9.9.250:9999 >/dev/null 2>&1
+got=$?
+check "--verify failing is reported as failure" 1 "$got"
+check "and the policy was taken back out"       ISP "$(ask app)"
+
+echo
+echo "-- --revert removes the routing half too, not just the ruleset"
+"$PLAN" "${APPLY[@]}" --apply --deadman 0 >/dev/null 2>&1
+"$PLAN" --netns tl-app --revert >/dev/null 2>&1
+check "no nftables table"  0 "$(netns tl-app nft list tables 2>/dev/null | wc -l)"
+check "no ip rules"        0 "$(netns tl-app ip rule show | grep -c fwmark)"
+check "no routing table"   0 "$(netns tl-app ip route show table 7401 2>/dev/null | wc -l)"
+check "traffic is normal"  ISP "$(ask app)"
+
+echo
+echo "-- a refused plan changes nothing at all"
+before=$(netns tl-app nft list tables 2>/dev/null | wc -l)
+"$PLAN" --bare --iface tl-w0 --rp-filter all=1 --rp-filter tl-w0=1 \
+        --default vpn:tl-w0 --netns tl-app --apply --deadman 0 >/dev/null 2>&1
+check "a refused plan exits non-zero"      1 "$?"
+check "and applied nothing"                "$before" "$(netns tl-app nft list tables 2>/dev/null | wc -l)"
+
+# -------------------------------------------------------------------------
 echo
 echo "-- the host itself was never touched"
 check "host has no throughline table" 0 \
   "$(nft list tables 2>/dev/null | grep -c throughline)"
 check "host has no fwmark rules"      0 "$(ip rule show | grep -c fwmark)"
+check "host has no applied record"    0 \
+  "$([ -e /run/throughline/applied ] && echo 1 || echo 0)"
+check "host has no revert timer"      0 \
+  "$(systemctl is-active throughline-revert.timer 2>/dev/null | grep -c '^active$')"
 
 echo
 echo "=== $PASS passed, $FAIL failed, $SKIP skipped"
