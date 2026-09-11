@@ -232,6 +232,7 @@ mod tests {
             tor_uid: Some(105),
             admin_peers: vec![],
             tunnel_endpoints: vec![],
+            rp_filter: vec![("all".into(), 2), ("wg0".into(), 2)],
             cgroups: vec!["system.slice/nginx.service".into()],
         }
     }

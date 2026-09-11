@@ -70,6 +70,82 @@ for (const [w, h, tag] of [[1600,1000,'wide'], [900,1100,'narrow'], [420,900,'ph
       `(${litSw.length} lit, ${direct.size} truly reached it)`);
     await p.evaluate((d) => document.querySelector(`[data-id="dst:${CSS.escape(d)}"]`).click(), dst);
 
+    // ---- the routing editor, driven the way a person would ----------
+    await p.click('#tab-route');
+    await p.waitForSelector('#src-list .chip');
+
+    // Every program with a live connection must be offerable. The two
+    // tabs disagreed: the busiest actor on the machine had no chip.
+    const cover = await p.evaluate(() => {
+      const act = R.host.active || [];
+      const shown = new Set([...document.querySelectorAll('#src-list .chip')]
+        .map(c => c.dataset.cg));
+      const sel = new Set(selectable());
+      return { missing: act.filter(a => !sel.has(a)), active: act.length };
+    });
+    check(cover.missing.length === 0,
+      `route: every connected program is routable (${cover.active} active, ` +
+      `${cover.missing.length} missing)`);
+
+    // Keyboard only: focus a chip, Enter to select, Tab to a box, Enter.
+    const kb = await p.evaluate(async () => {
+      const chip = document.querySelector('#src-list .chip');
+      const cg = chip.dataset.cg;
+      chip.focus(); chip.dispatchEvent(new KeyboardEvent('keydown',
+        {key:'Enter', bubbles:true}));
+      const bin = document.querySelector('.bin[data-path="tor"]');
+      const reachable = bin.tabIndex >= 0;
+      bin.focus();
+      const focused = document.activeElement === bin;
+      bin.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
+      return { reachable, focused, placed: R.placed[cg] === 'tor', cg,
+               keptFocus: document.activeElement?.classList.contains('chip') };
+    });
+    check(kb.reachable && kb.focused, 'route: drop boxes are in the tab order');
+    check(kb.placed, 'route: a program can be placed with the keyboard alone');
+    check(kb.keptFocus, 'route: focus survives a placement');
+
+    // The × takes it back out.
+    const removed = await p.evaluate(() => {
+      const x = document.querySelector('.bin[data-path="tor"] .chip .x');
+      if (!x) return { had: false };
+      const cg = x.closest('.chip').dataset.cg;
+      x.click();
+      return { had: true, gone: !(cg in R.placed) };
+    });
+    check(removed.had && removed.gone, 'route: a placed program can be removed');
+
+    // Filtering, and Start over.
+    const tools = await p.evaluate(() => {
+      const before = document.querySelectorAll('#src-list .chip').length;
+      const box = document.getElementById('search');
+      box.value = 'zzzz-no-such-program';
+      box.dispatchEvent(new Event('input', {bubbles:true}));
+      const after = document.querySelectorAll('#src-list .chip').length;
+      box.value = ''; box.dispatchEvent(new Event('input', {bubbles:true}));
+      R.placed = {'system.slice/x.service': 'tor'};
+      document.getElementById('reset').click();
+      return { before, after, cleared: Object.keys(R.placed).length === 0,
+               restored: document.querySelectorAll('#src-list .chip').length };
+    });
+    check(tools.after === 0 && tools.restored === tools.before,
+      `route: the filter narrows and clears (${tools.before} → ${tools.after} → ${tools.restored})`);
+    check(tools.cleared, 'route: Start over clears every placement');
+
+    // Icons actually resolve to a symbol in the sprite.
+    const icons = await p.evaluate(() => {
+      const uses = [...document.querySelectorAll('svg.ic use')];
+      const bad = uses.map(u => u.getAttribute('href'))
+        .filter(h => !document.querySelector(h));
+      return { count: uses.length, bad };
+    });
+    check(icons.count > 0 && icons.bad.length === 0,
+      `route: ${icons.count} icons all resolve (${icons.bad.length} broken)`);
+
+    await p.screenshot({ path: `${out}-route.png` });
+    await p.click('#tab-observe');
+    await p.waitForTimeout(200);
+
     const sel = await p.evaluate(() => {
       document.querySelector('#l-software .node').click();
       return { sel: document.querySelectorAll('.node.sel').length,

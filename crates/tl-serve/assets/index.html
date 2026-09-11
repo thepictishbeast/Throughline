@@ -57,8 +57,10 @@
   .node.dim{opacity:.22}
   .node .n{font-weight:600;font-size:.82rem;overflow:hidden;text-overflow:ellipsis;
            white-space:nowrap}
+  /* Detail wraps; only the NAME ellipses. A truncated name still has its
+     title attribute, but ":11332 · 11 conn…" loses the fact itself. */
   .node .m{color:var(--dim);font-size:.72rem;font-family:var(--mono);
-           overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+           overflow-wrap:anywhere;line-height:1.35}
   .node.app{border-left:3px solid var(--app)}
   .node.service{border-left:3px solid var(--service)}
   .node.container{border-left:3px solid var(--container)}
@@ -155,6 +157,55 @@
        cursor:pointer}
   .btn[disabled]{opacity:.4;cursor:not-allowed}
   .err{color:var(--warn)}
+
+  /* ---- icons: one stroke weight, sized by context, never decorative-only */
+  .ic{width:1em;height:1em;stroke:currentColor;fill:none;stroke-width:1.7;
+      stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:-.12em}
+  .bin h4 .ic{width:1.15em;height:1.15em;margin-right:.35rem}
+
+  /* ---- motion. One idea: things that move are things that changed.
+     A person who has asked their system not to animate gets no motion at
+     all, which is the whole point of asking. */
+  @keyframes tl-in{from{opacity:0;transform:translateY(-4px) scale(.97)}
+                   to{opacity:1;transform:none}}
+  @keyframes tl-pulse{0%,100%{box-shadow:0 0 0 0 transparent}
+                      50%{box-shadow:0 0 0 3px color-mix(in srgb,var(--hot) 28%,transparent)}}
+  @keyframes tl-flow{to{stroke-dashoffset:-18}}
+  @keyframes tl-pop{0%{transform:scale(1)}40%{transform:scale(1.13)}100%{transform:scale(1)}}
+  .chip{animation:tl-in .16s ease-out both}
+  .bin.over{animation:tl-pulse .9s ease-in-out infinite}
+  .chip.dragging{opacity:.45;transform:rotate(-1.5deg) scale(.98)}
+  .bin .drop:empty::after{content:"drop here";display:block;color:var(--dim);
+      font-size:.72rem;font-style:italic;text-align:center;padding:.9rem 0;
+      border:1px dashed var(--line);border-radius:7px}
+  .bin.over .drop:empty::after{color:var(--hot);border-color:var(--hot)}
+  .counts b,.dirs b{display:inline-block}
+  .bumped{animation:tl-pop .3s ease-out}
+  #wires path.out{stroke-dasharray:5 4;animation:tl-flow .9s linear infinite}
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation:none !important;transition:none !important}
+  }
+
+  /* ---- focus: every interactive thing, one treatment */
+  .node,.bin,.chip,.btn,.tab,select,input,summary{outline-offset:2px}
+  .node:focus-visible,.bin:focus-visible,.chip:focus-visible,
+  .btn:focus-visible,select:focus-visible,input:focus-visible,
+  summary:focus-visible{outline:2px solid var(--hot)}
+  .node{font:inherit;color:inherit;text-align:left;width:100%;display:block}
+  .bin{cursor:pointer}
+  .bin:focus-visible{border-color:var(--hot)}
+
+  /* ---- search + chip removal */
+  .search{display:flex;align-items:center;gap:.4rem;background:var(--bg);
+          border:1px solid var(--line);border-radius:6px;padding:.25rem .45rem;
+          margin-bottom:.5rem}
+  .search input{background:none;border:0;color:var(--ink);font:inherit;
+                font-size:.78rem;width:100%;padding:.1rem}
+  .search .ic{color:var(--dim)}
+  .chip .x{margin-left:auto;background:none;border:0;color:var(--dim);
+           cursor:pointer;padding:.1rem;line-height:0;border-radius:4px}
+  .chip .x:hover{color:var(--warn);background:#221a18}
+  .toolbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.9rem 0}
 </style>
 </head>
 <body>
@@ -165,6 +216,24 @@
   <div class="dirs" id="dirs"></div>
 </header>
 
+<!-- One sprite, drawn once, referenced by <use>. Inline because the page's
+     CSP allows no external anything, and because an icon that fails to load
+     is worse than no icon. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <g id="i-globe"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></g>
+    <g id="i-tunnel"><path d="M4 20V12a8 8 0 0 1 16 0v8"/><path d="M9 20v-8a3 3 0 0 1 6 0v8"/></g>
+    <g id="i-onion"><path d="M12 3c4 4 6 7 6 10a6 6 0 0 1-12 0c0-3 2-6 6-10z"/><path d="M12 8c1.6 2 2.5 3.5 2.5 5a2.5 2.5 0 0 1-5 0c0-1.5.9-3 2.5-5z"/></g>
+    <g id="i-layered"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="M3 13l9 5 9-5"/></g>
+    <g id="i-app"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 20h8M12 18v2"/></g>
+    <g id="i-device"><rect x="2" y="5" width="20" height="12" rx="2"/><path d="M7 21h10"/></g>
+    <g id="i-close"><path d="M6 6l12 12M18 6L6 18"/></g>
+    <g id="i-search"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></g>
+    <g id="i-shield"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z"/></g>
+    <g id="i-live"><circle cx="12" cy="12" r="4"/><path d="M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></g>
+  </defs>
+</svg>
+
 <nav class="tabs" role="tablist">
   <button class="tab" id="tab-observe" role="tab" aria-selected="true"
           aria-controls="view-observe">What is connected</button>
@@ -174,7 +243,7 @@
 
 <main id="view-observe" role="tabpanel" aria-labelledby="tab-observe">
   <section class="stage">
-    <div class="hint" id="hint">Click any node to follow one path. Click it again to clear.</div>
+    <div class="hint" id="hint">Choose any node to follow one path — click it, or Tab to it and press Enter.</div>
     <div class="lanes" id="lanes">
       <svg id="wires"></svg>
       <div class="lane"><div class="lane-title">Device</div><div id="l-device"></div></div>
@@ -211,33 +280,45 @@
     <div id="sessions"></div>
   </div>
 
-  <p class="sub" style="margin:0 0 .6rem">
-    Drag a program into a box. Or click a program, then click a box.
+  <p class="sub" style="margin:0 0 .6rem" id="howto">
+    Drag a program into a box. Or select one and press Enter on a box.
+    To take it out again, use the × on the program, or drop it back on
+    <em>Programs</em>.
   </p>
 
   <div class="board" id="board">
-    <div class="bin src" id="bin-src">
-      <h4>Programs</h4>
+    <div class="bin src" id="bin-src" tabindex="0" role="button"
+         aria-label="Programs — drop here to remove a program from its route">
+      <h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-app"/></svg>Programs</h4>
       <p class="plain">Running on this machine now.</p>
+      <label class="search">
+        <svg class="ic" viewBox="0 0 24 24"><use href="#i-search"/></svg>
+        <input id="search" type="search" placeholder="Find a program…"
+               aria-label="Filter the list of programs">
+      </label>
       <div id="src-list"></div>
     </div>
-    <div class="bin" data-path="direct">
-      <h4>Straight out</h4>
+    <div class="bin" data-path="direct" tabindex="0" role="button"
+         aria-label="Straight out — drop a program here, or press Enter with one selected">
+      <h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-globe"/></svg>Straight out</h4>
       <p class="plain">Normal. Your provider can see where it goes.</p>
       <div class="drop"></div>
     </div>
-    <div class="bin" data-path="vpn">
-      <h4>Through the VPN</h4>
+    <div class="bin" data-path="vpn" tabindex="0" role="button"
+         aria-label="Through the VPN — drop a program here, or press Enter with one selected">
+      <h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-tunnel"/></svg>Through the VPN</h4>
       <p class="plain">Your provider sees the VPN. The VPN sees the rest.</p>
       <div class="drop"></div>
     </div>
-    <div class="bin" data-path="tor">
-      <h4>Through Tor</h4>
+    <div class="bin" data-path="tor" tabindex="0" role="button"
+         aria-label="Through Tor — drop a program here, or press Enter with one selected">
+      <h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-onion"/></svg>Through Tor</h4>
       <p class="plain">Nobody sees both who you are and where you went.</p>
       <div class="drop"></div>
     </div>
-    <div class="bin" data-path="tor-via">
-      <h4>Tor, through the VPN</h4>
+    <div class="bin" data-path="tor-via" tabindex="0" role="button"
+         aria-label="Tor, through the VPN — drop a program here, or press Enter with one selected">
+      <h4><svg class="ic" viewBox="0 0 24 24"><use href="#i-layered"/></svg>Tor, through the VPN</h4>
       <p class="plain">Tor itself goes through the VPN first.</p>
       <div class="drop"></div>
     </div>
@@ -254,7 +335,7 @@
   </div>
 
   <div class="card">
-    <h3>What that means</h3>
+    <h3><svg class="ic" viewBox="0 0 24 24"><use href="#i-shield"/></svg> What that means</h3>
     <div class="story" id="story"></div>
   </div>
 
@@ -272,6 +353,7 @@
     </details>
     <p style="margin-top:.6rem">
       <button class="btn" id="apply" disabled>Apply</button>
+      <button class="btn" id="reset" type="button">Start over</button>
       <span class="sub" id="applywhy"></span>
     </p>
   </div>
@@ -333,7 +415,12 @@ function el(tag, cls, txt){
 }
 
 function node(id, cls, name, meta, note){
-  const d = el('div', 'node ' + cls);
+  // A button, not a div. Following a path is the observe tab's only
+  // interaction and it was reachable by pointer alone: 46 nodes, none in
+  // the tab order, none activatable from the keyboard.
+  const d = document.createElement('button');
+  d.type = 'button';
+  d.className = 'node ' + cls;
   d.dataset.id = id;
   d.title = [name, meta, note].filter(Boolean).join(' — ');
   d.appendChild(el('div','n',name));
@@ -570,10 +657,11 @@ function paint(){
   for (const [id, d] of nodes){
     d.classList.toggle('sel', id === selected);
     d.classList.toggle('dim', !!path && !path.nodes.has(id));
+    d.setAttribute('aria-pressed', String(id === selected));
   }
   $('hint').textContent = selected
-    ? 'Following ' + selected.slice(selected.indexOf(':') + 1) + ' — click it again to clear.'
-    : 'Click any node to follow one path. Click it again to clear.';
+    ? 'Following ' + selected.slice(selected.indexOf(':') + 1) + ' — choose it again to clear.'
+    : 'Choose any node to follow one path — click it, or Tab to it and press Enter.';
 
   const svg = $('wires');
   const box = lanes.getBoundingClientRect();
@@ -598,6 +686,9 @@ function paint(){
     // carries 1. Scaled linearly the quiet one would be invisible.
     const weight = Math.min(5, 1 + Math.log2(e.n));
     p.setAttribute('stroke', on ? `var(--${e.kind})` : 'var(--wire)');
+    // Only lit wires flow. Motion everywhere is noise; motion on the path
+    // you are following is the direction of travel.
+    if (on && path) p.classList.add('out');
     p.setAttribute('stroke-width', on ? weight : Math.min(weight, 0.8));
     p.setAttribute('opacity', on ? (path ? 0.95 : 0.45) : 0.1);
     const label = e.a.slice(e.a.indexOf(':')+1) + ' \u2192 ' + e.b.slice(e.b.indexOf(':')+1);
@@ -627,7 +718,22 @@ addEventListener('resize', paint);
 // ---- route editor -----------------------------------------------------
 // Two ways in, because drag-and-drop is not usable by everyone: drag a
 // chip, or click a chip and then click a box. Both drive the same state.
-const R = { host: null, placed: {}, sel: null, iface: '', dflt: 'direct', showAll: false };
+const R = { host: null, placed: {}, sel: null, iface: '', dflt: 'direct',
+            showAll: false, filter: '' };
+const ICON = {direct:'i-globe', vpn:'i-tunnel', tor:'i-onion', 'tor-via':'i-layered'};
+
+function icon(id, cls){
+  const svg = document.createElementNS(SVGNS, 'svg');
+  svg.setAttribute('class', 'ic' + (cls ? ' ' + cls : ''));
+  // Without this the icon is a 1em window onto a 24-unit drawing: every
+  // one rendered as its own top-left corner.
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS(SVGNS, 'use');
+  use.setAttribute('href', '#' + id);
+  svg.appendChild(use);
+  return svg;
+}
 
 function tab(which){
   for (const [id, view] of [['observe','view-observe'], ['route','view-route']]){
@@ -656,10 +762,19 @@ const HASHY = /(docker|libpod|crio|cri-containerd)[-_][0-9a-f]{12,}/;
 // that cannot do anything.
 const NOT_A_PROGRAM = /\.(mount|socket|timer|target|device|swap|path|slice)$/;
 function selectable(){
-  const all = R.host?.cgroups || [];
   const active = new Set(R.host?.active || []);
+  // The UNION, not just `cgroups`. A transient scope — the shell you are
+  // typing in, a browser started from a desktop session — appears in
+  // `active` because it has a connection open right now, and did not
+  // appear in `cgroups` at all. The two tabs disagreed silently: the
+  // observe view showed it as the busiest thing on the machine and the
+  // editor offered no way to route it.
+  const all = [...new Set([...(R.host?.cgroups || []), ...active])];
+  const q = R.filter.trim().toLowerCase();
   const usable = all.filter(c =>
-    !NOT_A_PROGRAM.test(c) && (R.showAll || !HASHY.test(c)));
+    !NOT_A_PROGRAM.test(c)
+    && (R.showAll || !HASHY.test(c))
+    && (!q || c.toLowerCase().includes(q)));
   // What is talking right now goes first. Alphabetical order puts the
   // one entry someone came here for wherever the alphabet happened to
   // put it.
@@ -667,23 +782,36 @@ function selectable(){
     (active.has(b) - active.has(a)) || a.localeCompare(b));
 }
 
-function chip(cg){
+function chip(cg, placed){
   const d = el('div','chip');
   d.draggable = true;
   d.tabIndex = 0;
   d.dataset.cg = cg;
   d.title = cg;
   d.appendChild(el('span','grip','⠿'));
+  d.appendChild(icon(placed ? ICON[placed] : 'i-app'));
   d.appendChild(el('span','nm', friendly(cg)));
   if ((R.host?.active || []).includes(cg)){
-    const live = el('span','live','· connected now');
-    d.appendChild(live);
+    d.appendChild(icon('i-live','live'));
+    d.appendChild(el('span','live','now'));
     d.title += ' — has a connection leaving the machine right now';
+  }
+  if (placed){
+    // Removal was possible but invisible: you had to know to click the
+    // chip and then click the Programs box.
+    const x = document.createElement('button');
+    x.className = 'x'; x.type = 'button';
+    x.setAttribute('aria-label', 'Take ' + friendly(cg) + ' out of ' + placed);
+    x.appendChild(icon('i-close'));
+    x.addEventListener('click', e => { e.stopPropagation(); place(cg, null); });
+    d.appendChild(x);
   }
   d.addEventListener('dragstart', e => {
     e.dataTransfer.setData('text/plain', cg);
     e.dataTransfer.effectAllowed = 'move';
+    d.classList.add('dragging');
   });
+  d.addEventListener('dragend', () => d.classList.remove('dragging'));
   const pick = () => {
     R.sel = R.sel === cg ? null : cg;
     paintBoard();
@@ -699,6 +827,11 @@ function place(cg, path){
   if (path === null) delete R.placed[cg]; else R.placed[cg] = path;
   R.sel = null;
   paintBoard();
+  // paintBoard() rebuilds every chip, so focus lands on BODY and a
+  // keyboard user loses their place after every single move.
+  const moved = document.querySelector(`.chip[data-id-cg="${CSS.escape(cg)}"]`)
+             || [...document.querySelectorAll('.chip')].find(c => c.dataset.cg === cg);
+  if (moved) moved.focus({ preventScroll: true });
   refreshPlan();
 }
 
@@ -707,10 +840,15 @@ function paintBoard(){
   src.replaceChildren();
   const unplaced = selectable().filter(c => !(c in R.placed));
   if (!unplaced.length) src.appendChild(el('div','plain','all placed'));
-  for (const cg of unplaced.slice(0, LANE_CAP)) src.appendChild(chip(cg));
+  for (const cg of unplaced.slice(0, LANE_CAP)) src.appendChild(chip(cg, null));
   if (unplaced.length > LANE_CAP)
-    src.appendChild(el('div','plain', '+ ' + (unplaced.length - LANE_CAP) + ' more not shown'));
-  const hidden = (R.host?.cgroups || []).length - selectable().length;
+    src.appendChild(el('div','plain',
+      '+ ' + (unplaced.length - LANE_CAP) + ' more — type above to find one'));
+  // Count what the toggle actually reveals. Subtracting the full list
+  // included the .mount/.socket units the toggle never shows, so the
+  // number was wrong by exactly those.
+  const hidden = [...new Set([...(R.host?.cgroups || []), ...(R.host?.active || [])])]
+    .filter(c => HASHY.test(c) && !NOT_A_PROGRAM.test(c)).length;
   if (hidden > 0 || R.showAll){
     const lab = document.createElement('label');
     lab.className = 'plain';
@@ -728,7 +866,7 @@ function paintBoard(){
     const drop = bin.querySelector('.drop');
     drop.replaceChildren();
     for (const [cg, p] of Object.entries(R.placed)){
-      if (p === bin.dataset.path) drop.appendChild(chip(cg));
+      if (p === bin.dataset.path) drop.appendChild(chip(cg, p));
     }
   }
   for (const c of document.querySelectorAll('.chip'))
@@ -742,7 +880,12 @@ for (const bin of document.querySelectorAll('.bin')){
     e.dataTransfer.dropEffect = 'move';
     bin.classList.add('over');
   });
-  bin.addEventListener('dragleave', () => bin.classList.remove('over'));
+  bin.addEventListener('dragleave', e => {
+    // A dragleave fires when the pointer crosses onto a CHILD element, so
+    // an unguarded handler un-highlights the target while the pointer is
+    // still inside it.
+    if (!bin.contains(e.relatedTarget)) bin.classList.remove('over');
+  });
   bin.addEventListener('drop', e => {
     e.preventDefault();
     bin.classList.remove('over');
@@ -752,6 +895,19 @@ for (const bin of document.querySelectorAll('.bin')){
   // Click-to-place, the keyboard-and-touch path to the same result.
   bin.addEventListener('click', e => {
     if (e.target.closest('.chip')) return;
+    if (R.sel) place(R.sel, target);
+  });
+  // And the same by keyboard. Without this a keyboard user could select a
+  // program and never place it: the boxes were not in the tab order at
+  // all, so the only task on this screen was impossible without a mouse.
+  bin.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    // The same guard the click handler has. Without it, Enter on a chip
+    // sets the selection and then BUBBLES to the box the chip is sitting
+    // in, which places it there and clears the selection again — so
+    // keyboard selection appeared to do nothing at all.
+    if (e.target.closest('.chip')) return;
+    e.preventDefault();
     if (R.sel) place(R.sel, target);
   });
 }
@@ -792,7 +948,10 @@ function renderStory(){
   lines.push(['everything else', R.dflt]);
   for (const [who, kind] of lines){
     const row = el('div');
-    row.appendChild(el('span','hopname', who));
+    const lead = el('span','hopname');
+    lead.appendChild(icon(ICON[kind] || 'i-app'));
+    lead.appendChild(document.createTextNode(' ' + who));
+    row.appendChild(lead);
     for (const h of hops(kind)){
       row.appendChild(el('span','arrow','→'));
       row.appendChild(el('span','hopname', h));
@@ -827,19 +986,27 @@ async function refreshPlan(){
   }
 }
 
-async function loadHost(){
+async function loadHost(first){
+  let ticked = new Set();
+  if (!first)
+    for (const i of document.querySelectorAll('#sessions input:checked')) ticked.add(i.value);
   try {
     const r = await fetch('/api/host', {cache:'no-store'});
     R.host = await r.json();
   } catch { return; }
 
+  // Re-read on a timer. This card exists to stop you cutting off your own
+  // session, and it was a single read taken at page load: a session opened
+  // afterwards was invisible, and therefore unprotected, while the card
+  // still said "somebody is connected right now".
   const sess = $('sessions'); sess.replaceChildren();
   if (!R.host.sessions.length)
     sess.appendChild(el('p','plain','No inbound sessions detected. Nothing to protect.'));
   for (const s of R.host.sessions){
     const row = el('div','session');
     const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.value = s.peer; cb.checked = s.likely;
+    cb.type = 'checkbox'; cb.value = s.peer;
+    cb.checked = first ? s.likely : (ticked.has(s.peer) || s.likely);
     cb.id = 'sess-' + s.peer;
     cb.addEventListener('change', refreshPlan);
     row.appendChild(cb);
@@ -853,6 +1020,8 @@ async function loadHost(){
     row.appendChild(txt);
     sess.appendChild(row);
   }
+
+  if (!first){ paintBoard(); refreshPlan(); return; }
 
   const sel = $('iface'); sel.replaceChildren();
   // Loopback is not a tunnel, and neither is a bridge to a container.
@@ -871,7 +1040,17 @@ async function loadHost(){
   paintBoard();
   refreshPlan();
 }
-loadHost();
+loadHost(true);
+// The host changes: sessions open, programs start and stop. Slower than the
+// socket poll because it is a heavier read and nothing here is per-packet.
+setInterval(() => { if (!$('view-route').hidden) loadHost(false); }, 9000);
+
+$('search').addEventListener('input', e => { R.filter = e.target.value; paintBoard(); });
+$('reset').addEventListener('click', () => {
+  R.placed = {}; R.sel = null; R.filter = ''; R.dflt = 'direct';
+  $('search').value = ''; $('dflt').value = 'direct';
+  paintBoard(); refreshPlan();
+});
 
 </script>
 </body>

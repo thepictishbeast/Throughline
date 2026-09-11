@@ -1,16 +1,95 @@
 # Throughline
 
-Every connection this Linux machine has, attributed to the thing that
-opened it, drawn as the path the traffic actually takes.
+**See everything your Linux machine is talking to, and change where it
+goes — by dragging.**
 
-Today it **observes**. It does not change a route, start a tunnel, or
-touch a firewall rule, and the UI says so on every screen. Routing
-control is the next phase and is deliberately not half-built here.
+Two screens. The first shows every network connection on the machine and
+which program opened it. The second lets you drag a program into a box —
+*Straight out*, *Through the VPN*, *Through Tor* — and shows you exactly
+what that would do before anything happens.
 
+---
+
+## Try it in two minutes
+
+You need Rust. If you do not have it: <https://rustup.rs>
+
+```bash
+git clone https://github.com/thepictishbeast/Throughline
+cd Throughline
+cargo run --release -p tl-serve
 ```
-cargo run --release -p tl-serve        # http://127.0.0.1:7644
-sudo cargo run --release -p tl-serve   # see other users' processes too
+
+Open <http://127.0.0.1:7644>. That is the whole install — no packages, no
+config file, no daemon.
+
+Run it with `sudo` to see other users' processes too:
+
+```bash
+sudo -E cargo run --release -p tl-serve
 ```
+
+It listens on your own machine only. There is no flag to change that, on
+purpose: a screen listing every program on your computer and everywhere
+it connects is a map of your machine, and it does not get a port on the
+network.
+
+### Requirements
+
+| | |
+| --- | --- |
+| Linux | any kernel with cgroup v2 — anything from 2019 onward |
+| Rust | 1.85 or newer |
+| Everything else | nothing. Zero third-party crates. |
+
+To *change* routing you also need `nftables` and `iproute2`, which nearly
+every distribution already has, and a VPN interface or Tor if you want to
+use those paths. Throughline does not install or configure either — it
+uses what is already there.
+
+## What you will see
+
+**Tab one — what is connected.** Five columns, left to right: this
+device, the programs, any local service traffic passes through, the
+network interface it leaves by, and where it ends up. Click a program to
+light up only its path. Thicker lines carry more connections.
+
+**Tab two — change where it goes.** Drag a program into a box. The page
+says in one sentence what the box means, shows the path the traffic would
+take in plain words, and lists anything that would stop it working. If
+you want the exact firewall rules, there is an expander for that.
+
+Nothing is applied. This build produces the rules and shows them to you.
+
+## Is this safe to run?
+
+Reading is always safe: it opens no sockets, writes nothing, and sends
+nothing anywhere. The whole first tab is `/proc`.
+
+Changing routes is where care is needed, which is why the tool refuses
+more than it accepts. See **[What it refuses to
+produce](#what-it-refuses-to-produce)** below.
+
+## Command line
+
+The same compiler the browser uses:
+
+```bash
+cargo build --release -p tl-policy --bin tl-plan
+
+./target/release/tl-plan \
+    --default direct \
+    --rule cgroup:system.slice/firefox.service=tor \
+    --admin 203.0.113.7            # the address you are connected from
+```
+
+It prints an nftables ruleset on stdout and everything else on stderr, so
+`tl-plan ... | nft -f -` does what it looks like. It exits non-zero and
+prints nothing if the plan must not be applied.
+
+`tl-plan --help` lists the rest.
+
+---
 
 ## Nothing here is a list of known software
 
@@ -162,6 +241,33 @@ Stated here rather than discovered later:
   records. A service that binds a low source port for outgoing traffic
   would be misread.
 
+## Proving it actually routes
+
+A rule being present in a ruleset is not evidence that traffic follows
+it. A rule can be present, load cleanly, and never match — that is the
+most common way per-application routing goes wrong, and it looks exactly
+like success.
+
+```bash
+cargo build --release -p tl-policy --bin tl-plan
+sudo scripts/netns-test.sh
+```
+
+This builds three network namespaces and puts the **same destination
+address at the far end of both paths**. Whichever listener answers says
+which way the packet actually went; there is nothing to interpret. 19
+cases: a selected program is rerouted and an unselected one is not, a
+cgroup selector does not match its sibling, the exclusions genuinely
+exclude, applying twice does not stack rules, revert leaves nothing
+behind.
+
+Your own machine is never touched. Each namespace has its own nftables,
+ip rules and routing tables, and destroying it destroys them.
+
+Running real traffic through generated rulesets is how three bugs were
+found that every unit test had passed — see the commit history for
+`ct mark`, `masquerade` and `rp_filter`.
+
 ## Verifying the UI
 
 ```
@@ -203,6 +309,7 @@ machine should be auditable without first auditing a dependency tree.
 tool also works against a container's bound `/proc` or a captured tree.
 
 ## Changing where traffic goes
+
 
 The second tab is a policy editor. Drag a program into a box — Straight
 out, Through the VPN, Through Tor, Tor through the VPN — or click the

@@ -575,9 +575,7 @@ impl Plan {
                 // as strict refuses a plan that would work. Strict is
                 // exactly max == 1.
                 let get = |n: &str| host.rp_filter.iter().find(|(k, _)| k == n).map(|(_, v)| *v);
-                let strict = match (get("all"), get(i)) {
-                    (a, b) => a.unwrap_or(0).max(b.unwrap_or(0)) == 1,
-                };
+                let strict = get("all").unwrap_or(0).max(get(i).unwrap_or(0)) == 1;
                 if strict
                     && !out.iter().any(|r| {
                         matches!(r, Refusal::StrictReversePath { interface } if interface == i)
@@ -925,7 +923,7 @@ mod tests {
         };
         let nft = p.compile(&host()).nft;
         for line in nft.lines().filter(|l| l.trim_start().starts_with("chain ")) {
-            let name = line.trim().split_whitespace().nth(1).unwrap();
+            let name = line.split_whitespace().nth(1).unwrap();
             assert!(name.starts_with("tl_"), "chain {name} is not prefixed: {line}");
         }
     }
