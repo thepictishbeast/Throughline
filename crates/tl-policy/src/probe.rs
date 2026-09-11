@@ -56,8 +56,37 @@ pub fn host(proc_root: &FsPath, sys_root: &FsPath, torrc: &FsPath) -> Host {
         tor_uid,
         admin_peers,
         tunnel_endpoints: Vec::new(),
+        rp_filter: rp_filter(proc_root),
         cgroups: cgroups(sys_root),
     }
+}
+
+/// `rp_filter` for every interface, from `/proc/sys/net/ipv4/conf/*`.
+///
+/// Includes the pseudo-interface `all`, because the kernel takes the
+/// MAXIMUM of `all` and the specific interface — so `all=1` makes every
+/// interface strict no matter what its own setting says, and reading only
+/// the named interface reports "loose" for a host that will drop the
+/// replies anyway.
+#[must_use]
+pub fn rp_filter(proc_root: &FsPath) -> Vec<(String, u8)> {
+    let root = proc_root.join("sys/net/ipv4/conf");
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
+        if let Ok(v) = std::fs::read_to_string(e.path().join("rp_filter")) {
+            if let Ok(n) = v.trim().parse::<u8>() {
+                out.push((name, n));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// A live inbound session that a policy must not cut off.
@@ -483,6 +512,19 @@ mod tests {
             });
             assert!(live, "{p} is not an established session ({half_open} half-open rows present)");
         }
+    }
+
+    #[test]
+    fn reverse_path_filtering_is_read_for_every_interface_including_all() {
+        // `all` matters as much as the named interface: the kernel takes
+        // the maximum of the two, so all=1 makes everything strict and a
+        // check that read only the named interface would report a host as
+        // safe when every reply will be dropped.
+        let rp = rp_filter(FsPath::new("/proc"));
+        assert!(!rp.is_empty(), "no interfaces read");
+        assert!(rp.iter().any(|(n, _)| n == "all"), "{rp:?}");
+        assert!(rp.iter().any(|(n, _)| n == "lo"), "{rp:?}");
+        assert!(rp.iter().all(|(_, v)| *v <= 2), "{rp:?}");
     }
 
     #[test]
