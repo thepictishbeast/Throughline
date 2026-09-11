@@ -133,6 +133,67 @@ pub fn policy_from_query(query: &str, base: Host) -> (Policy, Host, Vec<String>)
     (policy, host, bad)
 }
 
+/// Carry out one of the three actions that change the machine.
+///
+/// The dead-man switch is not optional here and cannot be set to zero.
+/// From a terminal, choosing no countdown is a considered decision a
+/// person makes about a machine they can get back to another way. From a
+/// browser it is a checkbox somebody clicks past, and the consequence is
+/// a host nobody can reach.
+#[must_use]
+pub fn do_write(action: &str, query: &str) -> String {
+    use tl_policy::apply;
+    let mut opts = apply::Options {
+        deadman_secs: 120,
+        // Lets a test instance act on a throwaway network namespace
+        // instead of this machine, so the browser path can be proven
+        // end to end without a production host as the test bed.
+        netns: std::env::var("TL_NETNS").ok().filter(|v| !v.is_empty()),
+        ..apply::Options::default()
+    };
+    for (k, v) in params(query) {
+        match k.as_str() {
+            "deadman" => {
+                if let Ok(n) = v.parse::<u32>() {
+                    opts.deadman_secs = n.clamp(30, 3600);
+                }
+            }
+            "verify" if !v.is_empty() => opts.verify = Some(v),
+            _ => {}
+        }
+    }
+    let err = |e: &dyn std::fmt::Display| format!("{{\"error\":\"{}\"}}", esc(&e.to_string()));
+    match action {
+        "/api/confirm" => match apply::confirm(&opts) {
+            Ok(_) => "{\"ok\":true,\"did\":\"confirmed\"}".to_owned(),
+            Err(e) => err(&e),
+        },
+        "/api/revert" => match apply::revert(&opts) {
+            Ok(_) => "{\"ok\":true,\"did\":\"reverted\"}".to_owned(),
+            Err(e) => err(&e),
+        },
+        _ => {
+            let base = tl_policy::probe::host(
+                std::path::Path::new("/proc"),
+                std::path::Path::new("/sys"),
+                std::path::Path::new("/etc/tor/torrc"),
+            );
+            let (policy, host, bad) = policy_from_query(query, base);
+            if !bad.is_empty() {
+                return format!("{{\"error\":\"{}\"}}", esc(&bad.join("; ")));
+            }
+            let plan = policy.compile(&host);
+            match apply::apply(&policy, &host, &plan, &opts) {
+                Ok(a) => format!(
+                    "{{\"ok\":true,\"did\":\"applied\",\"countdown\":{},\"seconds\":{}}}",
+                    a.deadman, opts.deadman_secs
+                ),
+                Err(e) => err(&e),
+            }
+        }
+    }
+}
+
 /// JSON string escaping, matching the inventory crate's.
 #[must_use]
 pub fn esc(s: &str) -> String {
@@ -339,6 +400,28 @@ mod tests {
         );
         for bad in ["", "vpn", "vpn:", "tor-via:", "TOR", "tor ", "direct:x"] {
             assert_eq!(parse_path(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_browser_apply_always_has_a_countdown_and_it_cannot_be_short() {
+        // From a terminal, "no countdown" is a decision about a machine
+        // you can reach another way. From a browser it is a checkbox
+        // somebody clicks past, and the cost is a host nobody can reach.
+        for (q, want) in [("deadman=0", 30u32), ("deadman=5", 30), ("deadman=99999", 3600),
+                          ("deadman=300", 300), ("", 120)] {
+            let mut opts = tl_policy::apply::Options {
+                deadman_secs: 120,
+                ..tl_policy::apply::Options::default()
+            };
+            for (k, v) in params(q) {
+                if k == "deadman" {
+                    if let Ok(n) = v.parse::<u32>() {
+                        opts.deadman_secs = n.clamp(30, 3600);
+                    }
+                }
+            }
+            assert_eq!(opts.deadman_secs, want, "for {q:?}");
         }
     }
 

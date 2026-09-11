@@ -28,6 +28,7 @@ use std::path::Path;
 use std::time::Duration;
 
 mod api;
+mod gate;
 
 use tl_inventory::ports::EphemeralPorts;
 use tl_inventory::services::ServiceNames;
@@ -57,14 +58,26 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let gate = gate::Gate::new();
     println!("throughline: http://{addr}  (loopback only)");
+    if gate.token().is_empty() {
+        println!(
+            "  could not read /dev/urandom, so routing cannot be changed from the \
+             browser. Use tl-plan directly."
+        );
+    } else {
+        // Printed here and nowhere else. This is the whole point: a page
+        // that merely reached this server cannot know it, and a person at
+        // the terminal can read it off.
+        println!("  to change routing from the browser, paste this once: {}", gate.token());
+    }
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
                 // Serial on purpose. One viewer, and a scan that overlaps
                 // itself would show two half-snapshots interleaved. The
                 // timeouts above are what make serial safe.
-                if let Err(e) = handle(s) {
+                if let Err(e) = handle(s, &gate) {
                     eprintln!("throughline: {e}");
                 }
             }
@@ -137,7 +150,7 @@ fn torrc() -> String {
     std::env::var("TL_TORRC").unwrap_or_else(|_| "/etc/tor/torrc".to_owned())
 }
 
-fn handle(mut stream: TcpStream) -> std::io::Result<()> {
+fn handle(mut stream: TcpStream, gate: &gate::Gate) -> std::io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -220,8 +233,38 @@ fn handle(mut stream: TcpStream) -> std::io::Result<()> {
                 api::plan_json(&policy, &host, &bad, &api::apply_command(query)),
             )
         }
+        // ---- the three that change the machine ------------------------
+        p @ ("/api/apply" | "/api/confirm" | "/api/revert") => {
+            let query = path.split_once('?').map_or("", |(_, q)| q);
+            let token = api::params(query)
+                .into_iter()
+                .find(|(k, _)| k == "token")
+                .map(|(_, v)| v);
+            if !gate.allows(token.as_deref()) {
+                eprintln!("throughline: refused {p} — wrong or missing token");
+                return respond(
+                    &mut stream,
+                    "403 Forbidden",
+                    "application/json; charset=utf-8",
+                    concat!(
+                        r#"{"error":"Paste the token printed by tl-serve on the "#,
+                        r#"terminal it was started from. A page that can merely reach "#,
+                        r#"this server does not have it."}"#
+                    ),
+                );
+            }
+            let out = api::do_write(p, query);
+            (
+                if out.starts_with("{\"error\"") { "400 Bad Request" } else { "200 OK" },
+                "application/json; charset=utf-8",
+                out,
+            )
+        }
         "/api/status" => {
-            let st = tl_policy::apply::status(&tl_policy::apply::Options::default());
+            let st = tl_policy::apply::status(&tl_policy::apply::Options {
+                netns: std::env::var("TL_NETNS").ok().filter(|v| !v.is_empty()),
+                ..tl_policy::apply::Options::default()
+            });
             (
                 "200 OK",
                 "application/json; charset=utf-8",

@@ -56,6 +56,8 @@ pub enum ApplyError {
     /// The new connection made after applying did not work, so the policy
     /// was reverted.
     VerificationFailed { target: String, detail: String },
+    /// There is nothing applied to act on.
+    NothingApplied,
     Io(std::io::Error),
 }
 
@@ -86,6 +88,10 @@ impl std::fmt::Display for ApplyError {
                 "applied, then could not open a new connection to {target} ({detail}), \
                  so it was reverted. An existing session surviving would have proved \
                  nothing: every open flow is excluded by construction."
+            ),
+            Self::NothingApplied => write!(
+                f,
+                "nothing is applied, so there is nothing to undo or confirm."
             ),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -396,6 +402,11 @@ fn record(opts: &Options, applied: &Applied) -> std::io::Result<()> {
 /// Returns the io error if the record cannot be read or removed.
 pub fn revert(opts: &Options) -> Result<Applied, ApplyError> {
     let p = state_path(opts);
+    // "No such file or directory (os error 2)" is a true statement about
+    // a path and tells the person nothing about their machine.
+    if !p.exists() {
+        return Err(ApplyError::NothingApplied);
+    }
     let text = std::fs::read_to_string(&p)?;
     let applied = Applied::parse(&text);
     let ns = opts.netns.as_deref();
@@ -411,6 +422,9 @@ pub fn revert(opts: &Options) -> Result<Applied, ApplyError> {
 /// Returns the io error if the record cannot be updated.
 pub fn confirm(opts: &Options) -> Result<Applied, ApplyError> {
     let p = state_path(opts);
+    if !p.exists() {
+        return Err(ApplyError::NothingApplied);
+    }
     let mut applied = Applied::parse(&std::fs::read_to_string(&p)?);
     disarm(opts.netns.as_deref())?;
     applied.deadman = false;
@@ -621,6 +635,17 @@ mod tests {
             deadman_armed: false,
         };
         assert!(half.describe().contains("marks lead nowhere"));
+    }
+
+    #[test]
+    fn undoing_nothing_says_so_in_words_about_the_machine() {
+        // Not "No such file or directory (os error 2)", which is a true
+        // statement about a path and tells nobody anything.
+        let opts = Options { netns: Some("tl-no-such-ns".into()), ..Options::default() };
+        let e = revert(&opts).unwrap_err();
+        assert!(matches!(e, ApplyError::NothingApplied), "{e:?}");
+        assert!(e.to_string().contains("nothing is applied"));
+        assert!(matches!(confirm(&opts).unwrap_err(), ApplyError::NothingApplied));
     }
 
     #[test]

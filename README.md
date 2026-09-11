@@ -59,7 +59,8 @@ says in one sentence what the box means, shows the path the traffic would
 take in plain words, and lists anything that would stop it working. If
 you want the exact firewall rules, there is an expander for that.
 
-The page does not apply it for you — it gives you the command to run. See
+You can apply it from the page, or copy the command and run it yourself.
+Either way it undoes itself unless you confirm. See
 **[Applying it](#applying-it)**.
 
 ## Applying it
@@ -90,11 +91,31 @@ connection that was already open is excluded on purpose, so it survives
 whether the policy is right or catastrophic. `--verify host:port` makes
 the tool do this for you and undo immediately if it fails.
 
-The page does not apply anything itself. This server reads every
-process's sockets, so it runs as root; a routing change reachable from a
-web request is a different proposition, and a browser can be induced to
-treat a loopback server as same-origin. Reading earns that risk behind a
-`Host` check. Rewriting the machine's routing does not.
+### Doing it from the page
+
+The buttons work, behind a token. `tl-serve` prints one at startup, on
+the terminal you started it from and nowhere else:
+
+```
+throughline: http://127.0.0.1:7644  (loopback only)
+  to change routing from the browser, paste this once: 9f3c…
+```
+
+Paste it once and *Apply now*, *Keep it* and *Undo* do what they say.
+
+That is the whole claim of the token, and it is worth being precise
+about: it is not a password. Anyone who can read that terminal can
+already run `tl-plan` themselves. It is proof that the request came from
+the person at the machine rather than from a page that merely reached the
+server — because reading every process's sockets means this runs as root,
+and a browser can be induced to treat a loopback server as same-origin. A
+`Host` check is enough for reading. It is not enough for rewriting the
+machine's routing.
+
+From the page the countdown is not optional and cannot be set below 30
+seconds. At a terminal, "no countdown" is a considered decision about a
+machine you can reach another way; in a browser it is a checkbox somebody
+clicks past.
 
 ## Is this safe to run?
 
@@ -299,6 +320,14 @@ behind.
 Your own machine is never touched. Each namespace has its own nftables,
 ip rules and routing tables, and destroying it destroys them.
 
+And the browser path, end to end — *Apply now* pressed in a real browser,
+against a `tl-serve` running inside the namespace, asserting that real
+traffic changed direction and that *Undo* put it back:
+
+```bash
+node scripts/browser-apply-test.mjs http://127.0.0.1:7645/ <token>
+```
+
 Running real traffic through generated rulesets is how three bugs were
 found that every unit test had passed — see the commit history for
 `ct mark`, `masquerade` and `rp_filter`.
@@ -398,7 +427,6 @@ to the real one.
 ## Not built yet
 
 * drag-and-drop editing of the topology diagram itself
-* applying from the browser (deliberate — see above)
 * anything about the far side of a tunnel: whether your provider leaks,
   what a real Tor guard sees, whether the egress address is what you
   think. The namespace suite proves the kernel does what the generated

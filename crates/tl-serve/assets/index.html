@@ -362,11 +362,27 @@
       <button class="btn" id="reset" type="button">Start over</button>
       <span class="sub" id="copied" aria-live="polite"></span>
     </p>
-    <p>It undoes itself after two minutes unless you run
-       <code>sudo tl-plan --confirm</code>. Before you confirm, open a
-       <strong>new</strong> connection and check it works — an existing
-       session still working proves nothing, because every connection that
-       was already open is excluded on purpose.</p>
+
+    <p>Or do it from here. Paste the token <code>tl-serve</code> printed on
+       the terminal you started it from — that is the only place it
+       appears, so a page that merely reached this server does not have
+       it.</p>
+    <p class="toolbar">
+      <label class="search" style="flex:1;min-width:14rem">
+        <svg class="ic" viewBox="0 0 24 24"><use href="#i-shield"/></svg>
+        <input id="token" type="password" autocomplete="off" spellcheck="false"
+               placeholder="token from the terminal" aria-label="Token from the terminal">
+      </label>
+      <button class="btn" id="doapply" type="button" disabled>Apply now</button>
+      <button class="btn" id="doconfirm" type="button" disabled>Keep it</button>
+      <button class="btn" id="dorevert" type="button" disabled>Undo</button>
+    </p>
+    <p class="sub" id="actionsaid" aria-live="polite"></p>
+
+    <p>It undoes itself after two minutes unless you keep it. Before you do,
+       open a <strong>new</strong> connection and check it works — an
+       existing session still working proves nothing, because every
+       connection that was already open is excluded on purpose.</p>
     <p>Right now: <strong id="applied">checking…</strong></p>
     <p class="sub" id="flushwarn" hidden></p>
   </div>
@@ -990,6 +1006,8 @@ async function refreshPlan(){
     for (const p of problems) ul.appendChild(el('li', null, p));
     for (const n of (plan.notes || [])) ul.appendChild(el('li','muted', n));
     $('applycmd').textContent = plan.command || '';
+    R.applyable = !!plan.applyable;
+    gateButtons();
     $('copy').disabled = !plan.applyable;
     $('applycard').classList.toggle('stop', !plan.applyable);
     $('applywhy').textContent = plan.applyable
@@ -1079,10 +1097,56 @@ $('copy').addEventListener('click', async () => {
   setTimeout(() => { $('copied').textContent = ''; }, 2500);
 });
 
+// Kept for the tab's lifetime only. Anything that can read this can
+// already make the same requests from the page; the boundary that matters
+// is the Host check plus the token never leaving the terminal.
+function token(){ return $('token').value.trim(); }
+
+async function act(what){
+  const t = token();
+  if (!t) { $('actionsaid').textContent = 'paste the token first'; return; }
+  const q = what === 'apply' ? '&' + query() : '';
+  $('actionsaid').textContent = 'working…';
+  try {
+    const r = await fetch(`/api/${what}?token=${encodeURIComponent(t)}${q}`,
+                          {cache:'no-store'});
+    const j = await r.json();
+    if (j.error){
+      $('actionsaid').textContent = j.error;
+      $('applycard').classList.add('stop');
+    } else {
+      $('applycard').classList.remove('stop');
+      $('actionsaid').textContent = j.did === 'applied'
+        ? `applied — it undoes itself in ${j.seconds}s unless you press "Keep it". `
+          + 'Open a NEW connection and check it works first.'
+        : j.did;
+      try { sessionStorage.setItem('tl-token', t); } catch {}
+    }
+  } catch (e) {
+    $('actionsaid').textContent = 'could not reach the server: ' + e.message;
+  }
+  refreshApplied();
+}
+$('doapply').addEventListener('click', () => act('apply'));
+$('doconfirm').addEventListener('click', () => act('confirm'));
+$('dorevert').addEventListener('click', () => act('revert'));
+try { $('token').value = sessionStorage.getItem('tl-token') || ''; } catch {}
+$('token').addEventListener('input', gateButtons);
+
+function gateButtons(){
+  const have = !!token();
+  const st = R.status || {};
+  $('doapply').disabled = !have || !R.applyable;
+  $('doconfirm').disabled = !have || !st.countdown;
+  $('dorevert').disabled = !have || !st.recorded;
+}
+
 async function refreshApplied(){
   try {
     const r = await fetch('/api/status', {cache:'no-store'});
     const st = await r.json();
+    R.status = st;
+    gateButtons();
     $('applied').textContent = st.text;
     const warn = $('flushwarn');
     warn.hidden = !st.baselineFlushes;
