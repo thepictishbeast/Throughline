@@ -10,3 +10,4 @@ publish.workspace = true
 
 [dependencies]
 tl-inventory = { path = "../tl-inventory" }
+tl-policy = { path = "../tl-policy" }

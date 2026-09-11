@@ -13,6 +13,10 @@
     --mono:ui-monospace,SFMono-Regular,Menlo,"Cascadia Mono",monospace;
   }
   *{box-sizing:border-box}
+  /* An author `display` rule beats the UA stylesheet's [hidden] rule, so
+     `main{display:grid}` left the observe view on screen underneath the
+     route view when the tab switched. */
+  [hidden]{display:none !important}
   body{margin:0;background:var(--bg);color:var(--ink);
        font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
   header{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;
@@ -88,6 +92,68 @@
   .muted{color:var(--dim)}
   footer{padding:.5rem 1.2rem;border-top:1px solid var(--line);color:var(--dim);
          font-size:.74rem}
+
+  /* ---- tabs */
+  .tabs{display:flex;gap:.2rem;padding:0 1.2rem;border-bottom:1px solid var(--line)}
+  .tab{background:none;border:0;border-bottom:2px solid transparent;color:var(--dim);
+       font:inherit;font-size:.85rem;padding:.55rem .9rem;cursor:pointer}
+  .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--hot)}
+  .tab:focus-visible{outline:2px solid var(--hot);outline-offset:-2px}
+
+  /* ---- route editor */
+  .route{padding:1.1rem 1.2rem 2rem;overflow:auto;height:calc(100vh - 6.6rem)}
+  @media (max-width:880px){.route{height:auto}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+        padding:.8rem .9rem;margin-bottom:1rem}
+  .card h3{margin:0 0 .45rem;font-size:.82rem;font-weight:600}
+  .card p{margin:.2rem 0;color:var(--dim);font-size:.78rem;max-width:62ch}
+  .session{display:flex;gap:.6rem;align-items:flex-start;padding:.4rem 0}
+  .session input{margin-top:.3rem;width:1rem;height:1rem;accent-color:var(--hot)}
+  .session .who{font-weight:600;font-family:var(--mono);font-size:.82rem}
+  .session .why{color:var(--dim);font-size:.74rem;max-width:70ch}
+
+  .board{display:grid;grid-template-columns:14rem repeat(4,minmax(10rem,1fr));
+         gap:.8rem;align-items:start;min-width:58rem}
+  .bin{background:var(--panel);border:1px dashed var(--line);border-radius:9px;
+       min-height:9rem;padding:.6rem}
+  .bin.over{border-color:var(--hot);background:#17201b}
+  .bin h4{margin:0 0 .1rem;font-size:.8rem;font-weight:600}
+  .bin .plain{color:var(--dim);font-size:.72rem;margin:0 0 .5rem;line-height:1.35}
+  .bin.src{border-style:solid}
+  #src-list{max-height:24rem;overflow-y:auto}
+  .chip{display:flex;align-items:center;gap:.4rem;background:var(--bg);
+        border:1px solid var(--line);border-left:3px solid var(--app);
+        border-radius:6px;padding:.35rem .5rem;margin-bottom:.35rem;
+        font-size:.78rem;cursor:grab}
+  .chip:active{cursor:grabbing}
+  .chip.sel{border-color:var(--hot);box-shadow:0 0 0 1px var(--hot) inset}
+  .chip .grip{color:var(--dim);font-size:.9rem;line-height:1}
+  .chip .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip .live{margin-left:auto;color:var(--hot);font-size:.68rem;white-space:nowrap}
+  .chip:focus-visible{outline:2px solid var(--hot);outline-offset:1px}
+
+  .fallback{display:flex;gap:.5rem;align-items:center;margin:.9rem 0 1.2rem;
+            font-size:.82rem;flex-wrap:wrap}
+  select{background:var(--panel);color:var(--ink);border:1px solid var(--line);
+         border-radius:6px;padding:.3rem .5rem;font:inherit;font-size:.8rem}
+
+  .story{font-family:var(--mono);font-size:.78rem;line-height:1.9}
+  .story .hopname{background:var(--bg);border:1px solid var(--line);
+                  border-radius:5px;padding:.1rem .4rem}
+  .story .arrow{color:var(--dim);padding:0 .35rem}
+  .stop{border-left:3px solid var(--warn)}
+  .stop li{margin:.3rem 0;font-size:.8rem}
+  .ok{border-left:3px solid var(--hot)}
+  details summary{cursor:pointer;font-size:.8rem;color:var(--dim);
+                  padding:.2rem 0;user-select:none}
+  details summary:focus-visible{outline:2px solid var(--hot)}
+  pre{background:#0a0c0f;border:1px solid var(--line);border-radius:7px;
+      padding:.7rem;overflow-x:auto;font-family:var(--mono);font-size:.72rem;
+      line-height:1.5;margin:.5rem 0}
+  .btn{background:var(--panel);color:var(--ink);border:1px solid var(--line);
+       border-radius:7px;padding:.45rem .9rem;font:inherit;font-size:.82rem;
+       cursor:pointer}
+  .btn[disabled]{opacity:.4;cursor:not-allowed}
   .err{color:var(--warn)}
 </style>
 </head>
@@ -99,7 +165,14 @@
   <div class="dirs" id="dirs"></div>
 </header>
 
-<main>
+<nav class="tabs" role="tablist">
+  <button class="tab" id="tab-observe" role="tab" aria-selected="true"
+          aria-controls="view-observe">What is connected</button>
+  <button class="tab" id="tab-route" role="tab" aria-selected="false"
+          aria-controls="view-route">Change where it goes</button>
+</nav>
+
+<main id="view-observe" role="tabpanel" aria-labelledby="tab-observe">
   <section class="stage">
     <div class="hint" id="hint">Click any node to follow one path. Click it again to clear.</div>
     <div class="lanes" id="lanes">
@@ -127,6 +200,82 @@
     </table>
   </aside>
 </main>
+
+<section class="route" id="view-route" role="tabpanel" aria-labelledby="tab-route" hidden>
+
+  <div class="card ok">
+    <h3>First: don't cut yourself off</h3>
+    <p>Somebody is connected to this machine right now. If a new route captures
+       that connection, it ends, and you cannot undo it from here. Tick the ones
+       that are you — those stay exactly as they are.</p>
+    <div id="sessions"></div>
+  </div>
+
+  <p class="sub" style="margin:0 0 .6rem">
+    Drag a program into a box. Or click a program, then click a box.
+  </p>
+
+  <div class="board" id="board">
+    <div class="bin src" id="bin-src">
+      <h4>Programs</h4>
+      <p class="plain">Running on this machine now.</p>
+      <div id="src-list"></div>
+    </div>
+    <div class="bin" data-path="direct">
+      <h4>Straight out</h4>
+      <p class="plain">Normal. Your provider can see where it goes.</p>
+      <div class="drop"></div>
+    </div>
+    <div class="bin" data-path="vpn">
+      <h4>Through the VPN</h4>
+      <p class="plain">Your provider sees the VPN. The VPN sees the rest.</p>
+      <div class="drop"></div>
+    </div>
+    <div class="bin" data-path="tor">
+      <h4>Through Tor</h4>
+      <p class="plain">Nobody sees both who you are and where you went.</p>
+      <div class="drop"></div>
+    </div>
+    <div class="bin" data-path="tor-via">
+      <h4>Tor, through the VPN</h4>
+      <p class="plain">Tor itself goes through the VPN first.</p>
+      <div class="drop"></div>
+    </div>
+  </div>
+
+  <div class="fallback">
+    <label for="dflt">Everything not in a box goes:</label>
+    <select id="dflt">
+      <option value="direct">Straight out</option>
+      <option value="tor">Through Tor</option>
+    </select>
+    <label for="iface">Tunnel:</label>
+    <select id="iface"></select>
+  </div>
+
+  <div class="card">
+    <h3>What that means</h3>
+    <div class="story" id="story"></div>
+  </div>
+
+  <div class="card stop" id="stop" hidden>
+    <h3>This cannot be applied yet</h3>
+    <ul id="stop-list"></ul>
+  </div>
+
+  <div class="card">
+    <details id="pro">
+      <summary>Show the exact rules this produces</summary>
+      <pre id="nft"></pre>
+      <pre id="ipcmds"></pre>
+      <pre id="torrc"></pre>
+    </details>
+    <p style="margin-top:.6rem">
+      <button class="btn" id="apply" disabled>Apply</button>
+      <span class="sub" id="applywhy"></span>
+    </p>
+  </div>
+</section>
 
 <footer id="foot">observe-only — nothing here changes a route</footer>
 
@@ -474,6 +623,256 @@ async function tick(){
 tick();
 setInterval(tick, 3000);
 addEventListener('resize', paint);
+
+// ---- route editor -----------------------------------------------------
+// Two ways in, because drag-and-drop is not usable by everyone: drag a
+// chip, or click a chip and then click a box. Both drive the same state.
+const R = { host: null, placed: {}, sel: null, iface: '', dflt: 'direct', showAll: false };
+
+function tab(which){
+  for (const [id, view] of [['observe','view-observe'], ['route','view-route']]){
+    const on = id === which;
+    $('tab-'+id).setAttribute('aria-selected', String(on));
+    $(view).hidden = !on;
+  }
+  if (which === 'route') refreshPlan();
+}
+$('tab-observe').addEventListener('click', () => tab('observe'));
+$('tab-route').addEventListener('click', () => tab('route'));
+
+// A cgroup path is what nftables matches on; this is what a person reads.
+function friendly(cg){
+  const leaf = cg.split('/').filter(Boolean).pop() || cg;
+  return leaf.replace(/\.(service|scope|slice)$/, '');
+}
+
+// A container scope is named by its id -- 64 hex characters -- which is
+// not something anyone recognises or would deliberately pick. They are
+// real routing targets, so they are kept behind a toggle rather than
+// dropped, and the default list is the things that have names.
+const HASHY = /(docker|libpod|crio|cri-containerd)[-_][0-9a-f]{12,}/;
+// A mount, a socket unit or a timer has no process and opens no
+// connection, so offering one as something to route is offering a choice
+// that cannot do anything.
+const NOT_A_PROGRAM = /\.(mount|socket|timer|target|device|swap|path|slice)$/;
+function selectable(){
+  const all = R.host?.cgroups || [];
+  const active = new Set(R.host?.active || []);
+  const usable = all.filter(c =>
+    !NOT_A_PROGRAM.test(c) && (R.showAll || !HASHY.test(c)));
+  // What is talking right now goes first. Alphabetical order puts the
+  // one entry someone came here for wherever the alphabet happened to
+  // put it.
+  return usable.sort((a, b) =>
+    (active.has(b) - active.has(a)) || a.localeCompare(b));
+}
+
+function chip(cg){
+  const d = el('div','chip');
+  d.draggable = true;
+  d.tabIndex = 0;
+  d.dataset.cg = cg;
+  d.title = cg;
+  d.appendChild(el('span','grip','⠿'));
+  d.appendChild(el('span','nm', friendly(cg)));
+  if ((R.host?.active || []).includes(cg)){
+    const live = el('span','live','· connected now');
+    d.appendChild(live);
+    d.title += ' — has a connection leaving the machine right now';
+  }
+  d.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', cg);
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  const pick = () => {
+    R.sel = R.sel === cg ? null : cg;
+    paintBoard();
+  };
+  d.addEventListener('click', pick);
+  d.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+  });
+  return d;
+}
+
+function place(cg, path){
+  if (path === null) delete R.placed[cg]; else R.placed[cg] = path;
+  R.sel = null;
+  paintBoard();
+  refreshPlan();
+}
+
+function paintBoard(){
+  const src = $('src-list');
+  src.replaceChildren();
+  const unplaced = selectable().filter(c => !(c in R.placed));
+  if (!unplaced.length) src.appendChild(el('div','plain','all placed'));
+  for (const cg of unplaced.slice(0, LANE_CAP)) src.appendChild(chip(cg));
+  if (unplaced.length > LANE_CAP)
+    src.appendChild(el('div','plain', '+ ' + (unplaced.length - LANE_CAP) + ' more not shown'));
+  const hidden = (R.host?.cgroups || []).length - selectable().length;
+  if (hidden > 0 || R.showAll){
+    const lab = document.createElement('label');
+    lab.className = 'plain';
+    lab.style.cssText = 'display:flex;gap:.35rem;align-items:center;margin-top:.5rem';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = R.showAll;
+    cb.addEventListener('change', () => { R.showAll = cb.checked; paintBoard(); });
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(
+      R.showAll ? 'showing containers too' : 'also show ' + hidden + ' containers'));
+    src.appendChild(lab);
+  }
+
+  for (const bin of document.querySelectorAll('.bin[data-path]')){
+    const drop = bin.querySelector('.drop');
+    drop.replaceChildren();
+    for (const [cg, p] of Object.entries(R.placed)){
+      if (p === bin.dataset.path) drop.appendChild(chip(cg));
+    }
+  }
+  for (const c of document.querySelectorAll('.chip'))
+    c.classList.toggle('sel', c.dataset.cg === R.sel);
+}
+
+for (const bin of document.querySelectorAll('.bin')){
+  const target = bin.dataset.path ?? null;
+  bin.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    bin.classList.add('over');
+  });
+  bin.addEventListener('dragleave', () => bin.classList.remove('over'));
+  bin.addEventListener('drop', e => {
+    e.preventDefault();
+    bin.classList.remove('over');
+    const cg = e.dataTransfer.getData('text/plain');
+    if (cg) place(cg, target);
+  });
+  // Click-to-place, the keyboard-and-touch path to the same result.
+  bin.addEventListener('click', e => {
+    if (e.target.closest('.chip')) return;
+    if (R.sel) place(R.sel, target);
+  });
+}
+
+// The path spelling the API wants, with the chosen tunnel filled in.
+function apiPath(kind){
+  if (kind === 'vpn') return R.iface ? 'vpn:' + R.iface : 'direct';
+  if (kind === 'tor-via') return R.iface ? 'tor-via:' + R.iface : 'tor';
+  return kind;
+}
+
+function query(){
+  const q = ['default=' + encodeURIComponent(apiPath(R.dflt))];
+  for (const inp of document.querySelectorAll('#sessions input:checked'))
+    q.push('admin=' + encodeURIComponent(inp.value));
+  for (const [cg, kind] of Object.entries(R.placed))
+    q.push('rule=' + encodeURIComponent('cgroup:' + cg) + '=' + encodeURIComponent(apiPath(kind)));
+  return q.join('&');
+}
+
+// Plain language for the diagram. The same fact as the ruleset below it,
+// said in words, because most people reading this screen will never open
+// the ruleset and still deserve to know what it does.
+function hops(kind){
+  switch (kind){
+    case 'direct':  return ['your network', 'the internet'];
+    case 'vpn':     return ['your network', R.iface || 'the tunnel', 'the internet'];
+    case 'tor':     return ['Tor', 'your network', 'a Tor exit', 'the internet'];
+    case 'tor-via': return ['Tor', R.iface || 'the tunnel', 'a Tor exit', 'the internet'];
+    default:        return ['the internet'];
+  }
+}
+
+function renderStory(){
+  const box = $('story');
+  box.replaceChildren();
+  const lines = Object.entries(R.placed).map(([cg, k]) => [friendly(cg), k]);
+  lines.push(['everything else', R.dflt]);
+  for (const [who, kind] of lines){
+    const row = el('div');
+    row.appendChild(el('span','hopname', who));
+    for (const h of hops(kind)){
+      row.appendChild(el('span','arrow','→'));
+      row.appendChild(el('span','hopname', h));
+    }
+    box.appendChild(row);
+  }
+}
+
+async function refreshPlan(){
+  if (!R.host) return;
+  renderStory();
+  try {
+    const r = await fetch('/api/plan?' + query(), {cache:'no-store'});
+    const plan = await r.json();
+    $('nft').textContent = plan.nft || '';
+    $('ipcmds').textContent = (plan.ip || []).join('\n');
+    $('torrc').textContent = (plan.torrc || []).length
+      ? '# /etc/tor/torrc must contain\n' + plan.torrc.join('\n') : '';
+    const problems = [...(plan.refusals || []), ...(plan.malformed || [])];
+    const stop = $('stop');
+    stop.hidden = !problems.length;
+    const ul = $('stop-list'); ul.replaceChildren();
+    for (const p of problems) ul.appendChild(el('li', null, p));
+    for (const n of (plan.notes || [])) ul.appendChild(el('li','muted', n));
+    $('apply').disabled = true;
+    $('applywhy').textContent = plan.applyable
+      ? 'nothing is applied from this screen yet — this build only produces the rules'
+      : 'fix the problems above first';
+  } catch (e) {
+    $('stop').hidden = false;
+    $('stop-list').replaceChildren(el('li', null, 'could not build a plan: ' + e.message));
+  }
+}
+
+async function loadHost(){
+  try {
+    const r = await fetch('/api/host', {cache:'no-store'});
+    R.host = await r.json();
+  } catch { return; }
+
+  const sess = $('sessions'); sess.replaceChildren();
+  if (!R.host.sessions.length)
+    sess.appendChild(el('p','plain','No inbound sessions detected. Nothing to protect.'));
+  for (const s of R.host.sessions){
+    const row = el('div','session');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = s.peer; cb.checked = s.likely;
+    cb.id = 'sess-' + s.peer;
+    cb.addEventListener('change', refreshPlan);
+    row.appendChild(cb);
+    const txt = el('div');
+    const lab = document.createElement('label');
+    lab.className = 'who'; lab.htmlFor = cb.id;
+    lab.textContent = s.peer + ' on port ' + s.port +
+      (s.likely ? '  — probably you' : '  — unconfirmed');
+    txt.appendChild(lab);
+    txt.appendChild(el('div','why', s.evidence));
+    row.appendChild(txt);
+    sess.appendChild(row);
+  }
+
+  const sel = $('iface'); sel.replaceChildren();
+  // Loopback is not a tunnel, and neither is a bridge to a container.
+  const tunnels = R.host.interfaces.filter(i =>
+    /^(wg|tun|tap|ppp|nord|proton|mullvad)/.test(i));
+  for (const i of (tunnels.length ? tunnels : R.host.interfaces)){
+    const o = document.createElement('option');
+    o.value = i; o.textContent = i; sel.appendChild(o);
+  }
+  R.iface = sel.value || '';
+  sel.addEventListener('change', () => { R.iface = sel.value; refreshPlan(); });
+
+  const d = $('dflt');
+  d.addEventListener('change', () => { R.dflt = d.value; refreshPlan(); });
+
+  paintBoard();
+  refreshPlan();
+}
+loadHost();
+
 </script>
 </body>
 </html>

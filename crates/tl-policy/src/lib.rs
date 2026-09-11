@@ -1,0 +1,743 @@
+//! Turning "this app goes through Tor" into rules a kernel will accept.
+//!
+//! The dangerous part of per-app routing is not the rule you meant to
+//! write. It is the four you did not:
+//!
+//! * **Your own session.** Redirect everything and the SSH connection you
+//!   are typing into goes with it. You find out when the prompt stops
+//!   coming back and the machine is somewhere else.
+//! * **The tunnel's own packets.** Route a VPN client's traffic into the
+//!   VPN and it cannot reach its server to build the tunnel.
+//! * **Tor's own traffic.** Send Tor's output into Tor and it never
+//!   reaches a relay.
+//! * **DNS.** Route an app's TCP through Tor and leave its DNS alone, and
+//!   every site it visits is still announced in plaintext to the
+//!   resolver. The traffic is anonymous; the browsing is not.
+//!
+//! Each is generated here rather than remembered, and [`Plan::preflight`]
+//! refuses a plan that is missing one. A compiler that emits a ruleset
+//! which locks you out is not a convenience.
+//!
+//! Nothing in this crate executes anything. It produces text: an
+//! nftables ruleset, `ip` commands, and torrc lines. Applying them is a
+//! separate, deliberate step.
+
+pub mod probe;
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+/// Where an application's traffic should go.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Path {
+    /// Straight out of the default route, as it goes today.
+    Direct,
+    /// Into a tunnel interface. The interface carries the traffic; this
+    /// crate does not bring it up.
+    Vpn { interface: String },
+    /// Transparently into Tor, TCP and DNS both.
+    Tor,
+    /// Into Tor, with Tor's own traffic carried by the tunnel first.
+    ///
+    /// This is the ordering people mean by "Tor over VPN": the ISP sees a
+    /// VPN connection, the VPN provider sees Tor traffic, and the Tor
+    /// guard sees the VPN's address rather than yours.
+    TorViaVpn { interface: String },
+}
+
+impl Path {
+    /// A short label for a UI.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Direct => "direct".to_owned(),
+            Self::Vpn { interface } => format!("vpn:{interface}"),
+            Self::Tor => "tor".to_owned(),
+            Self::TorViaVpn { interface } => format!("tor-via-{interface}"),
+        }
+    }
+
+    /// Whether traffic on this path is handed to Tor.
+    #[must_use]
+    pub const fn uses_tor(&self) -> bool {
+        matches!(self, Self::Tor | Self::TorViaVpn { .. })
+    }
+
+    /// The tunnel interface this path needs, if any.
+    #[must_use]
+    pub fn interface(&self) -> Option<&str> {
+        match self {
+            Self::Vpn { interface } | Self::TorViaVpn { interface } => Some(interface),
+            Self::Direct | Self::Tor => None,
+        }
+    }
+}
+
+/// What a rule matches on.
+///
+/// All three are things the kernel can test on the socket that owns an
+/// outgoing packet, which is what makes per-application routing possible
+/// at all: the decision is made from the sender, not from the address it
+/// is heading to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Selector {
+    /// A cgroup v2 path, as it appears under `/sys/fs/cgroup`.
+    Cgroup(String),
+    /// A systemd unit, resolved to its cgroup.
+    Unit(String),
+    /// Everything a user runs.
+    User(u32),
+}
+
+impl Selector {
+    /// The nftables expression that matches this sender.
+    ///
+    /// `socket cgroupv2 level N` compares the Nth component of the
+    /// socket's cgroup path, so the level must match the depth of the
+    /// path being tested or the rule matches nothing — silently, which is
+    /// the failure mode that makes people think their policy applied.
+    #[must_use]
+    pub fn nft_match(&self) -> String {
+        match self {
+            Self::Cgroup(p) => {
+                let p = p.trim_matches('/');
+                let level = p.split('/').count();
+                format!("socket cgroupv2 level {level} \"{p}\"")
+            }
+            Self::Unit(u) => {
+                let p = format!("system.slice/{u}");
+                format!("socket cgroupv2 level 2 \"{p}\"")
+            }
+            Self::User(uid) => format!("meta skuid {uid}"),
+        }
+    }
+
+    /// How to describe this in a UI.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Cgroup(p) => p.clone(),
+            Self::Unit(u) => u.clone(),
+            Self::User(uid) => format!("uid {uid}"),
+        }
+    }
+}
+
+/// One "send this through that".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    pub selector: Selector,
+    pub path: Path,
+}
+
+/// Facts about the host a policy is being compiled for.
+///
+/// Passed in rather than read here so the compiler stays pure and the
+/// preflight checks can be exercised against hosts this machine is not.
+#[derive(Debug, Clone, Default)]
+pub struct Host {
+    /// Interfaces that exist right now.
+    pub interfaces: Vec<String>,
+    /// Tor's transparent-proxy port, if it has one configured.
+    pub tor_trans_port: Option<u16>,
+    /// Tor's DNS port, if it has one configured.
+    pub tor_dns_port: Option<u16>,
+    /// The uid Tor runs as. Its own traffic must bypass the redirect.
+    pub tor_uid: Option<u32>,
+    /// Peer addresses of connections that must keep working — in
+    /// practice, whoever is administering this machine right now.
+    pub admin_peers: Vec<String>,
+    /// Addresses that must stay reachable outside any tunnel, such as a
+    /// VPN server's own endpoint.
+    pub tunnel_endpoints: Vec<String>,
+    /// cgroup v2 paths that exist right now, relative to the cgroup root.
+    ///
+    /// nftables resolves a cgroup path to an id when the rule is loaded
+    /// and rejects the whole ruleset if it cannot. So a policy naming a
+    /// service that is not running is not merely ineffective — it cannot
+    /// be applied at all, and it takes every other rule down with it.
+    pub cgroups: Vec<String>,
+}
+
+/// A policy: ordered rules, and what happens to everything else.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    pub rules: Vec<Rule>,
+    pub default_path: Path,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self { rules: Vec::new(), default_path: Path::Direct }
+    }
+}
+
+/// Why a plan must not be applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// A path needs an interface the host does not have.
+    NoSuchInterface { interface: String, path: String },
+    /// A path sends traffic to Tor, but Tor has no transparent port.
+    TorNotTransparent { missing: &'static str },
+    /// Tor's own uid is unknown, so its traffic cannot be excluded from
+    /// its own redirect.
+    TorUidUnknown,
+    /// Applying this would capture the connection administering the host.
+    WouldStrandAdmin { peer: String },
+    /// A rule matches nothing that could ever exist.
+    EmptySelector { selector: String },
+    /// Two rules claim the same sender.
+    DuplicateSelector { selector: String },
+    /// A rule names a cgroup that does not exist on this host.
+    NoSuchCgroup { path: String },
+}
+
+impl Refusal {
+    /// A sentence a person can act on.
+    #[must_use]
+    pub fn explain(&self) -> String {
+        match self {
+            Self::NoSuchInterface { interface, path } => format!(
+                "path {path} needs interface {interface}, which does not exist on this host. \
+                 Bring the tunnel up first; this tool does not create interfaces."
+            ),
+            Self::TorNotTransparent { missing } => format!(
+                "traffic is routed to Tor but Tor has no {missing}. Add it to torrc and \
+                 reload Tor, otherwise the redirect sends packets to a closed port and \
+                 the application simply fails to connect."
+            ),
+            Self::TorUidUnknown => "Tor's uid is unknown, so its own traffic cannot be \
+                 excluded from the redirect. Every packet Tor sent to a relay would be \
+                 sent back to Tor."
+                .to_owned(),
+            Self::WouldStrandAdmin { peer } => format!(
+                "this would capture the connection from {peer}, which is administering \
+                 this host right now. Applying it ends that session and there is no \
+                 second one."
+            ),
+            Self::EmptySelector { selector } => {
+                format!("selector {selector:?} cannot match any socket")
+            }
+            Self::DuplicateSelector { selector } => format!(
+                "{selector} is claimed by two rules; the first would win and the second \
+                 would silently do nothing"
+            ),
+            Self::NoSuchCgroup { path } => format!(
+                "no cgroup {path} on this host, so nftables will reject the ruleset -- \
+                 and with it every other rule in the policy. Start the service first, \
+                 or select it from what is actually running."
+            ),
+        }
+    }
+}
+
+/// The concrete thing to apply, as text.
+#[derive(Debug, Clone, Default)]
+pub struct Plan {
+    /// A complete nftables table, safe to `nft -f`.
+    pub nft: String,
+    /// `ip rule` / `ip route` invocations, in order.
+    pub ip: Vec<String>,
+    /// Lines Tor needs in its configuration for this plan to work.
+    pub torrc: Vec<String>,
+    /// Mark value per path, for display.
+    pub marks: BTreeMap<String, u32>,
+    /// Things that are true and worth knowing, but not refusals.
+    pub notes: Vec<String>,
+}
+
+/// The first fwmark used. Arbitrary but distinctive, so a rule from this
+/// tool is recognisable in someone else's ruleset.
+const MARK_BASE: u32 = 0x7401;
+/// Routing tables are numbered from here, one per mark.
+const TABLE_BASE: u32 = 7401;
+
+/// The table name everything lives in, so the whole policy can be removed
+/// with one `nft delete table`.
+pub const TABLE: &str = "throughline";
+/// Chain names. Not `redirect` or `mark`: both are nftables keywords and
+/// a chain cannot be named after one. The generator's own tests passed
+/// happily while every ruleset it produced was rejected by the parser,
+/// which is the argument for checking generated config with the real
+/// tool rather than reading it.
+pub const NAT_CHAIN: &str = "tl_via_tor";
+pub const MARK_CHAIN: &str = "tl_routing";
+
+impl Policy {
+    /// Compile to a plan. Does not check it — see [`Plan::preflight`].
+    #[must_use]
+    pub fn compile(&self, host: &Host) -> Plan {
+        let mut plan = Plan::default();
+        let mut paths: Vec<Path> = Vec::new();
+        for r in &self.rules {
+            if !paths.contains(&r.path) {
+                paths.push(r.path.clone());
+            }
+        }
+        if !paths.contains(&self.default_path) {
+            paths.push(self.default_path.clone());
+        }
+        // Marks only mean anything for paths that move traffic to another
+        // route. Direct is the absence of a mark.
+        for (mark, p) in
+            (MARK_BASE..).zip(paths.iter().filter(|p| p.interface().is_some()))
+        {
+            plan.marks.insert(p.label(), mark);
+        }
+
+        let uses_tor = paths.iter().any(Path::uses_tor);
+        plan.nft = self.nft_ruleset(host, &plan.marks, uses_tor);
+
+        for (label, mark) in &plan.marks {
+            let table = TABLE_BASE + (mark - MARK_BASE);
+            let iface = paths
+                .iter()
+                .find(|p| &p.label() == label)
+                .and_then(Path::interface)
+                .unwrap_or_default();
+            plan.ip.push(format!(
+                "ip rule add fwmark {mark:#x} lookup {table} priority {}",
+                1000 + (mark - MARK_BASE)
+            ));
+            plan.ip.push(format!("ip route add default dev {iface} table {table}"));
+        }
+
+        if uses_tor {
+            let trans = host.tor_trans_port.unwrap_or(9040);
+            let dns = host.tor_dns_port.unwrap_or(9053);
+            plan.torrc.push(format!("TransPort 127.0.0.1:{trans}"));
+            plan.torrc.push(format!("DNSPort 127.0.0.1:{dns}"));
+            plan.torrc.push("AutomapHostsOnResolve 1".to_owned());
+            plan.torrc.push("AutomapHostsSuffixes .onion,.exit".to_owned());
+            plan.notes.push(
+                "DNS is redirected to Tor's DNSPort as well as TCP. Routing TCP alone \
+                 leaves every hostname the application looks up in plaintext, which \
+                 defeats the point while looking like it worked."
+                    .to_owned(),
+            );
+        }
+        if let Path::TorViaVpn { interface } = &self.default_path {
+            plan.notes.push(format!(
+                "Tor's own traffic is routed through {interface}, so the Tor guard sees \
+                 the tunnel's address. Everything else about Tor is unchanged."
+            ));
+        }
+        plan
+    }
+
+    fn nft_ruleset(&self, host: &Host, marks: &BTreeMap<String, u32>, uses_tor: bool) -> String {
+        let mut s = String::new();
+        let _ = writeln!(s, "# generated by throughline -- `nft delete table inet {TABLE}` removes it");
+        let _ = writeln!(s, "table inet {TABLE} {{");
+
+        if uses_tor {
+            let trans = host.tor_trans_port.unwrap_or(9040);
+            let dns = host.tor_dns_port.unwrap_or(9053);
+            let _ = writeln!(s, "  chain {NAT_CHAIN} {{");
+            let _ = writeln!(s, "    type nat hook output priority dstnat; policy accept;");
+            let _ = writeln!(s, "{}", Self::exclusions(host, "    "));
+            if let Some(uid) = host.tor_uid {
+                let _ = writeln!(s, "    # Tor's own packets, or they never reach a relay.");
+                let _ = writeln!(s, "    meta skuid {uid} return");
+            }
+            for r in self.rules.iter().filter(|r| r.path.uses_tor()) {
+                let _ = writeln!(
+                    s,
+                    "    {} meta l4proto tcp redirect to :{trans}",
+                    r.selector.nft_match()
+                );
+                let _ = writeln!(
+                    s,
+                    "    {} udp dport 53 redirect to :{dns}",
+                    r.selector.nft_match()
+                );
+            }
+            if self.default_path.uses_tor() {
+                let _ = writeln!(s, "    meta l4proto tcp redirect to :{trans}");
+                let _ = writeln!(s, "    udp dport 53 redirect to :{dns}");
+            }
+            let _ = writeln!(s, "  }}");
+        }
+
+        let _ = writeln!(s, "  chain {MARK_CHAIN} {{");
+        let _ = writeln!(s, "    type route hook output priority mangle; policy accept;");
+        let _ = writeln!(s, "{}", Self::exclusions(host, "    "));
+        for r in &self.rules {
+            if let Some(mark) = marks.get(&r.path.label()) {
+                let _ = writeln!(
+                    s,
+                    "    {} meta mark set {mark:#x}",
+                    r.selector.nft_match()
+                );
+            }
+        }
+        // Tor-via-VPN: it is Tor's OWN socket that must take the tunnel.
+        // Marking the application here would send it round the tunnel
+        // before Tor ever saw it, which is a different topology wearing
+        // the same name.
+        if let Path::TorViaVpn { interface } = &self.default_path
+            && let (Some(uid), Some(mark)) = (
+                host.tor_uid,
+                marks.get(&Path::TorViaVpn { interface: interface.clone() }.label()),
+            )
+        {
+            let _ = writeln!(s, "    # Tor itself takes the tunnel; apps take Tor.");
+            let _ = writeln!(s, "    meta skuid {uid} meta mark set {mark:#x}");
+        }
+        if let Some(mark) = marks.get(&self.default_path.label()) {
+            let _ = writeln!(s, "    meta mark set {mark:#x}   # default for everything else");
+        }
+        let _ = writeln!(s, "  }}");
+        let _ = writeln!(s, "}}");
+        s
+    }
+
+    /// Rules that must come before anything else, in every chain.
+    fn exclusions(host: &Host, indent: &str) -> String {
+        let mut s = String::new();
+        let _ = writeln!(s, "{indent}# Exclusions first. Order is the safety.");
+        let _ = writeln!(s, "{indent}oif lo return");
+        let _ = writeln!(
+            s,
+            "{indent}ct state established,related return   # replies to connections already open"
+        );
+        for peer in &host.admin_peers {
+            let _ = writeln!(
+                s,
+                "{indent}ip daddr {peer} return               # the session administering this host"
+            );
+        }
+        for ep in &host.tunnel_endpoints {
+            let _ = writeln!(
+                s,
+                "{indent}ip daddr {ep} return               # a tunnel's own endpoint"
+            );
+        }
+        s.trim_end().to_owned()
+    }
+}
+
+impl Plan {
+    /// Everything wrong with this plan, worst first. Empty means it can
+    /// be applied.
+    #[must_use]
+    pub fn preflight(&self, policy: &Policy, host: &Host) -> Vec<Refusal> {
+        let mut out = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+
+        for r in &policy.rules {
+            let label = r.selector.label();
+            if label.trim().is_empty() {
+                out.push(Refusal::EmptySelector { selector: label.clone() });
+            } else if seen.contains(&label) {
+                out.push(Refusal::DuplicateSelector { selector: label.clone() });
+            } else {
+                seen.push(label);
+            }
+        }
+
+        // nft resolves a cgroup path at load time. One that is not there
+        // fails the ENTIRE ruleset, so this is checked before anything is
+        // offered for applying.
+        for r in &policy.rules {
+            let wanted = match &r.selector {
+                Selector::Cgroup(p) => Some(p.trim_matches('/').to_owned()),
+                Selector::Unit(u) => Some(format!("system.slice/{u}")),
+                Selector::User(_) => None,
+            };
+            if let Some(w) = wanted
+                && !host.cgroups.is_empty()
+                && !host.cgroups.iter().any(|c| c.trim_matches('/') == w)
+            {
+                out.push(Refusal::NoSuchCgroup { path: w });
+            }
+        }
+
+        let mut paths: Vec<&Path> = policy.rules.iter().map(|r| &r.path).collect();
+        paths.push(&policy.default_path);
+        for p in &paths {
+            if let Some(i) = p.interface()
+                && !host.interfaces.iter().any(|h| h == i)
+            {
+                out.push(Refusal::NoSuchInterface {
+                    interface: i.to_owned(),
+                    path: p.label(),
+                });
+            }
+        }
+        if paths.iter().any(|p| p.uses_tor()) {
+            if host.tor_trans_port.is_none() {
+                out.push(Refusal::TorNotTransparent { missing: "TransPort" });
+            }
+            if host.tor_dns_port.is_none() {
+                out.push(Refusal::TorNotTransparent { missing: "DNSPort" });
+            }
+            if host.tor_uid.is_none() {
+                out.push(Refusal::TorUidUnknown);
+            }
+        }
+
+        // The check that matters most: an admin peer is only safe if the
+        // ruleset actually excludes it. Read the generated text rather
+        // than trusting that the generator did its job.
+        for peer in &host.admin_peers {
+            if !self.nft.contains(&format!("ip daddr {peer} return")) {
+                out.push(Refusal::WouldStrandAdmin { peer: peer.clone() });
+            }
+        }
+        out
+    }
+
+    /// The whole plan as something to read before applying it.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        let _ = writeln!(s, "{}", self.nft);
+        if !self.ip.is_empty() {
+            let _ = writeln!(s, "# routing");
+            for c in &self.ip {
+                let _ = writeln!(s, "{c}");
+            }
+        }
+        if !self.torrc.is_empty() {
+            let _ = writeln!(s, "\n# /etc/tor/torrc must contain");
+            for c in &self.torrc {
+                let _ = writeln!(s, "{c}");
+            }
+        }
+        for n in &self.notes {
+            let _ = writeln!(s, "\n# note: {n}");
+        }
+        s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host() -> Host {
+        Host {
+            interfaces: vec!["eth0".into(), "wg0".into()],
+            tor_trans_port: Some(9040),
+            tor_dns_port: Some(9053),
+            tor_uid: Some(107),
+            admin_peers: vec!["198.51.100.7".into()],
+            tunnel_endpoints: vec!["203.0.113.9".into()],
+            cgroups: vec![
+                "system.slice/nginx.service".into(),
+                "system.slice/tor.service".into(),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_session_administering_the_host_is_excluded_before_anything_else() {
+        // The failure this prevents is not subtle: you apply the policy,
+        // your own connection is captured, and the machine is somewhere
+        // else. There is no undo over a connection that is gone.
+        let p = Policy {
+            rules: vec![Rule {
+                selector: Selector::Unit("nginx.service".into()),
+                path: Path::Tor,
+            }],
+            default_path: Path::Direct,
+        };
+        let plan = p.compile(&host());
+        assert!(plan.nft.contains("ip daddr 198.51.100.7 return"));
+        let admin = plan.nft.find("198.51.100.7").unwrap();
+        let first_rule = plan.nft.find("redirect to :9040").unwrap();
+        assert!(admin < first_rule, "exclusion must precede the redirect:\n{}", plan.nft);
+        assert!(plan.preflight(&p, &host()).is_empty());
+    }
+
+    #[test]
+    fn a_plan_that_would_strand_the_admin_is_refused() {
+        // Same policy, but compiled without knowing about the session.
+        // Applying it to a host that does have one must be refused.
+        let blind = Host { admin_peers: vec![], ..host() };
+        let p = Policy {
+            rules: vec![Rule { selector: Selector::Unit("nginx.service".into()), path: Path::Tor }],
+            default_path: Path::Direct,
+        };
+        let plan = p.compile(&blind);
+        let refusals = plan.preflight(&p, &host());
+        assert_eq!(
+            refusals,
+            vec![Refusal::WouldStrandAdmin { peer: "198.51.100.7".into() }]
+        );
+        assert!(refusals[0].explain().contains("no second one"));
+    }
+
+    #[test]
+    fn tor_traffic_is_excluded_from_its_own_redirect() {
+        // Without this, every packet Tor sends to a relay is sent back to
+        // Tor. Nothing reaches the network and the cause is invisible.
+        let p = Policy {
+            rules: vec![Rule { selector: Selector::User(1000), path: Path::Tor }],
+            default_path: Path::Direct,
+        };
+        let plan = p.compile(&host());
+        assert!(plan.nft.contains("meta skuid 107 return"), "{}", plan.nft);
+        let tor_return = plan.nft.find("meta skuid 107 return").unwrap();
+        let redirect = plan.nft.find("redirect to :9040").unwrap();
+        assert!(tor_return < redirect);
+    }
+
+    #[test]
+    fn dns_is_routed_with_the_tcp_it_belongs_to() {
+        // Routing TCP through Tor and leaving DNS alone announces every
+        // hostname to the local resolver in plaintext. The traffic is
+        // anonymous and the browsing is not, which is worse than either
+        // honest alternative because it looks like it worked.
+        let p = Policy {
+            rules: vec![Rule { selector: Selector::User(1000), path: Path::Tor }],
+            default_path: Path::Direct,
+        };
+        let plan = p.compile(&host());
+        assert!(plan.nft.contains("udp dport 53 redirect to :9053"), "{}", plan.nft);
+        assert!(plan.torrc.iter().any(|l| l.starts_with("DNSPort")));
+        assert!(plan.notes.iter().any(|n| n.contains("plaintext")));
+    }
+
+    #[test]
+    fn tor_via_vpn_puts_tor_in_the_tunnel_not_the_application() {
+        // "Tor over VPN" means Tor's own connection to its guard rides
+        // the tunnel. Marking the application instead sends it round the
+        // tunnel before Tor ever sees it — a different topology with the
+        // same name.
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::TorViaVpn { interface: "wg0".into() },
+        };
+        let plan = p.compile(&host());
+        assert!(
+            plan.nft.contains("meta skuid 107 meta mark set"),
+            "Tor's own socket must be the marked one:\n{}",
+            plan.nft
+        );
+        assert!(plan.ip.iter().any(|c| c.contains("dev wg0")));
+        assert!(plan.notes.iter().any(|n| n.contains("guard sees the tunnel")));
+    }
+
+    #[test]
+    fn a_tunnels_own_endpoint_stays_outside_the_tunnel() {
+        // Route a VPN client's packets into the VPN and it can never
+        // reach its server to build the tunnel in the first place.
+        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let plan = p.compile(&host());
+        assert!(plan.nft.contains("ip daddr 203.0.113.9 return"), "{}", plan.nft);
+    }
+
+    #[test]
+    fn a_missing_interface_is_refused_rather_than_emitted() {
+        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "tun9".into() } };
+        let plan = p.compile(&host());
+        let r = plan.preflight(&p, &host());
+        assert!(r.contains(&Refusal::NoSuchInterface {
+            interface: "tun9".into(),
+            path: "vpn:tun9".into()
+        }));
+        assert!(r[0].explain().contains("does not create interfaces"));
+    }
+
+    #[test]
+    fn tor_without_a_transparent_port_is_refused_with_the_lines_to_add() {
+        let bare = Host { tor_trans_port: None, tor_dns_port: None, ..host() };
+        let p = Policy { rules: vec![], default_path: Path::Tor };
+        let plan = p.compile(&bare);
+        let r = plan.preflight(&p, &bare);
+        assert!(r.contains(&Refusal::TorNotTransparent { missing: "TransPort" }));
+        assert!(r.contains(&Refusal::TorNotTransparent { missing: "DNSPort" }));
+        // The plan still says what torrc needs, so the refusal is fixable.
+        assert!(plan.torrc.iter().any(|l| l.contains("TransPort")));
+    }
+
+    #[test]
+    fn a_rule_for_a_cgroup_that_is_not_there_is_refused_before_it_breaks_everything() {
+        // nft resolves the path when the ruleset loads. A missing cgroup
+        // does not make one rule inert -- it makes `nft -f` reject the
+        // file, so the policy that WAS fine never gets applied either.
+        // Found by feeding generated output to the real parser; every
+        // unit test here passed while this was broken.
+        let p = Policy {
+            rules: vec![Rule {
+                selector: Selector::Unit("firefox.service".into()),
+                path: Path::Tor,
+            }],
+            default_path: Path::Direct,
+        };
+        let plan = p.compile(&host());
+        assert!(plan.preflight(&p, &host()).contains(&Refusal::NoSuchCgroup {
+            path: "system.slice/firefox.service".into()
+        }));
+        // One that IS running passes.
+        let ok = Policy {
+            rules: vec![Rule {
+                selector: Selector::Unit("nginx.service".into()),
+                path: Path::Tor,
+            }],
+            default_path: Path::Direct,
+        };
+        assert!(ok.compile(&host()).preflight(&ok, &host()).is_empty());
+    }
+
+    #[test]
+    fn a_cgroup_selector_matches_at_its_own_depth() {
+        // `socket cgroupv2 level N` compares the Nth path component. Get
+        // the level wrong and the rule matches nothing, silently, which
+        // reads exactly like a policy that applied and did nothing.
+        assert_eq!(
+            Selector::Cgroup("system.slice/tor.service".into()).nft_match(),
+            "socket cgroupv2 level 2 \"system.slice/tor.service\""
+        );
+        assert_eq!(
+            Selector::Cgroup("/user.slice/user-1000.slice/session-3.scope".into()).nft_match(),
+            "socket cgroupv2 level 3 \"user.slice/user-1000.slice/session-3.scope\""
+        );
+        assert_eq!(
+            Selector::Unit("nginx.service".into()).nft_match(),
+            "socket cgroupv2 level 2 \"system.slice/nginx.service\""
+        );
+    }
+
+    #[test]
+    fn two_rules_for_one_sender_are_refused_not_silently_ordered() {
+        let p = Policy {
+            rules: vec![
+                Rule { selector: Selector::User(1000), path: Path::Tor },
+                Rule { selector: Selector::User(1000), path: Path::Direct },
+            ],
+            default_path: Path::Direct,
+        };
+        let plan = p.compile(&host());
+        let r = plan.preflight(&p, &host());
+        assert!(r.contains(&Refusal::DuplicateSelector { selector: "uid 1000".into() }));
+    }
+
+    #[test]
+    fn established_connections_are_never_captured() {
+        // A policy change must not tear down what is already open. That
+        // is also what keeps an inbound session alive when the rule is
+        // about outbound traffic.
+        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let plan = p.compile(&host());
+        assert!(plan.nft.contains("ct state established,related return"));
+    }
+
+    #[test]
+    fn the_whole_policy_is_removable_in_one_command() {
+        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let plan = p.compile(&host());
+        assert!(plan.nft.contains(&format!("table inet {TABLE} {{")));
+        assert!(plan.nft.contains(&format!("nft delete table inet {TABLE}")));
+    }
+
+    #[test]
+    fn direct_is_the_absence_of_a_mark_not_a_mark_of_its_own() {
+        let p = Policy { rules: vec![], default_path: Path::Direct };
+        let plan = p.compile(&host());
+        assert!(plan.marks.is_empty(), "{:?}", plan.marks);
+        assert!(plan.ip.is_empty(), "nothing to route");
+    }
+}

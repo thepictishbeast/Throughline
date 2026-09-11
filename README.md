@@ -202,10 +202,61 @@ machine should be auditable without first auditing a dependency tree.
 `TL_PROC` and `TL_SERVICES` override where those are read from, so the
 tool also works against a container's bound `/proc` or a captured tree.
 
+## Changing where traffic goes
+
+The second tab is a policy editor. Drag a program into a box — Straight
+out, Through the VPN, Through Tor, Tor through the VPN — or click the
+program and then the box, which is the same thing without a mouse. The
+screen says what each choice means in a sentence, and an expander shows
+the exact ruleset for anyone who wants to read it before believing it.
+
+Nothing is applied. The editor produces text: an nftables ruleset, `ip`
+commands, and the torrc lines Tor would need.
+
+### What it refuses to produce
+
+The dangerous part of per-application routing is not the rule you meant
+to write, it is the four you did not, and each of these is generated
+rather than remembered:
+
+* **Your own session.** Capture it and the connection you are typing into
+  ends, with no second one. Detected sessions are listed for you to
+  confirm, with the evidence for each — not assumed, see below.
+* **A tunnel's own packets.** Route a VPN client into its own VPN and it
+  can never reach its server.
+* **Tor's own traffic.** Send Tor's output into Tor and nothing reaches a
+  relay.
+* **DNS.** Route an app's TCP through Tor and leave DNS alone, and every
+  hostname is still announced in plaintext. The traffic is anonymous and
+  the browsing is not, which is worse than either honest alternative
+  because it looks like it worked.
+
+It also refuses a cgroup that does not exist. nftables resolves the path
+when the ruleset loads and rejects the whole file if it cannot — so a
+rule naming a stopped service is not merely inert, it takes every other
+rule down with it.
+
+### Why sessions are confirmed rather than detected
+
+There is no reliable way to ask Linux "is this connection authenticated".
+Checked on a current Debian host: `/run/utmp` no longer exists,
+`/run/systemd/sessions/*` recorded `REMOTE=0` for a session that had
+arrived over SSH, and every `sshd-session` process stayed under
+`system.slice/ssh.service` whether authenticated or not.
+
+What remains is that sshd drops to the logged-in user's uid once
+authentication succeeds. That is good evidence and not a guarantee, so
+the editor shows candidates with their evidence and a person ticks them.
+
+This is not fussiness. A TCP connection to port 22 reaches ESTABLISHED
+before any password is offered, so every brute-force attempt looks like a
+session — and this host had a scanner's address sitting in the list next
+to the real one.
+
 ## Not built yet
 
-* drag-and-drop topology editing
-* Tor-over-VPN configuration, and per-app routing control
+* applying a plan (this build only produces it)
+* drag-and-drop editing of the topology diagram itself
 * RiseupVPN / ProtonVPN integration
 * the hops beyond the NIC — ISP, VPN egress, Tor exit — which cannot be
   read from `/proc` and need active probing

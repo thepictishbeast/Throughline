@@ -7,8 +7,16 @@ name = "tl-inventory"
 version = "0.1.0"
 
 [[package]]
+name = "tl-policy"
+version = "0.1.0"
+dependencies = [
+ "tl-inventory",
+]
+
+[[package]]
 name = "tl-serve"
 version = "0.1.0"
 dependencies = [
  "tl-inventory",
+ "tl-policy",
 ]

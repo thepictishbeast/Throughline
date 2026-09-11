@@ -27,6 +27,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
+mod api;
+
 use tl_inventory::ports::EphemeralPorts;
 use tl_inventory::services::ServiceNames;
 use tl_inventory::snapshot;
@@ -125,6 +127,16 @@ fn host_is_local(host: &str) -> bool {
     name.parse::<IpAddr>().is_ok_and(|a| a.is_loopback())
 }
 
+/// Overridable so the tool works against a container's bound `/proc` or
+/// a captured tree.
+fn proc_root() -> String {
+    std::env::var("TL_PROC").unwrap_or_else(|_| "/proc".to_owned())
+}
+
+fn torrc() -> String {
+    std::env::var("TL_TORRC").unwrap_or_else(|_| "/etc/tor/torrc".to_owned())
+}
+
 fn handle(mut stream: TcpStream) -> std::io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -168,7 +180,7 @@ fn handle(mut stream: TcpStream) -> std::io::Result<()> {
             // Both paths are overridable so the tool works somewhere other
             // than a conventional host — a container with /proc bound
             // elsewhere, or a captured tree being examined after the fact.
-            let proc_root = std::env::var("TL_PROC").unwrap_or_else(|_| "/proc".to_owned());
+            let proc_root = proc_root();
             let services =
                 std::env::var("TL_SERVICES").unwrap_or_else(|_| "/etc/services".to_owned());
             let flows = snapshot::collect(Path::new(&proc_root));
@@ -178,6 +190,34 @@ fn handle(mut stream: TcpStream) -> std::io::Result<()> {
                 "200 OK",
                 "application/json; charset=utf-8",
                 snapshot::to_json(&flows, &names, ports),
+            )
+        }
+        "/api/host" => {
+            let host = tl_policy::probe::host(
+                std::path::Path::new(&proc_root()),
+                std::path::Path::new("/sys"),
+                std::path::Path::new(&torrc()),
+            );
+            let sessions = tl_policy::probe::admin_candidates(std::path::Path::new(&proc_root()));
+            let active = tl_policy::probe::active_cgroups(std::path::Path::new(&proc_root()));
+            (
+                "200 OK",
+                "application/json; charset=utf-8",
+                api::host_json(&host, &sessions, &active),
+            )
+        }
+        "/api/plan" => {
+            let query = path.split_once('?').map_or("", |(_, q)| q);
+            let base = tl_policy::probe::host(
+                std::path::Path::new(&proc_root()),
+                std::path::Path::new("/sys"),
+                std::path::Path::new(&torrc()),
+            );
+            let (policy, host, bad) = api::policy_from_query(query, base);
+            (
+                "200 OK",
+                "application/json; charset=utf-8",
+                api::plan_json(&policy, &host, &bad),
             )
         }
         _ => (
