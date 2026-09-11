@@ -9,6 +9,8 @@
 //!
 //! Nothing here writes, opens a socket, or changes a route.
 
+pub mod ports;
 pub mod proc_net;
 pub mod procs;
+pub mod services;
 pub mod snapshot;

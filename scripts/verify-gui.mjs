@@ -10,12 +10,14 @@
 //   tl-serve 7645 &
 //   node scripts/verify-gui.mjs http://127.0.0.1:7645/ /tmp/shot
 //
-// Playwright is not vendored here (this repo has no dependencies). Point
-// TL_PLAYWRIGHT at any package.json whose tree has it.
+// Playwright is not vendored here (this repo has no dependencies). Run
+// from a directory whose node_modules has it, or set TL_PLAYWRIGHT to
+// any package.json whose tree does.
 
 import { createRequire } from 'node:module';
-const require = createRequire(process.env.TL_PLAYWRIGHT
-  || '/home/paul/projects/PlausiDen-Crawler/package.json');
+// Resolve playwright from wherever the caller has it. Nothing is
+// vendored here, so this is the one thing the script cannot detect.
+const require = createRequire(process.env.TL_PLAYWRIGHT || `${process.cwd()}/package.json`);
 const { chromium } = require('playwright');
 const url = process.argv[2] || 'http://127.0.0.1:7644/';
 const out = process.argv[3] || '/tmp/throughline';
@@ -39,11 +41,18 @@ for (const [w, h, tag] of [[1600,1000,'wide'], [900,1100,'narrow'], [420,900,'ph
     junk: /undefined|NaN|\\b1 (flows|connections|local hops)\\b/.test(document.body.innerText),
     emptyLanes: ['l-device','l-software','l-proxy','l-nic','l-dest']
                   .filter(id => !document.getElementById(id).children.length),
+    // A node's NAME may ellipse (the title carries it in full), but its
+    // meta must fit: ":53 · 96 connections · stops here" truncating to
+    // "…· s…" hid the one fact that line exists to report.
+    clippedMeta: [...document.querySelectorAll('.node .m')]
+                   .filter(m => m.scrollWidth > m.clientWidth + 1)
+                   .map(m => m.textContent),
   }));
   check(!v.hScroll, `${tag}: page body does not scroll sideways`);
   check(v.clipped === 0, `${tag}: no table cell past the panel edge (${v.clipped})`);
   check(!v.junk, `${tag}: no undefined/NaN/plural bug on screen`);
   check(!v.emptyLanes.length, `${tag}: every lane populated (${v.emptyLanes})`);
+  check(!v.clippedMeta.length, `${tag}: no node detail truncated (${v.clippedMeta.slice(0,2)})`);
 
   if (tag === 'wide') {
     const api = await (await fetch(url + 'api/snapshot')).json();

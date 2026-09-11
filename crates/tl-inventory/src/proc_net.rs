@@ -46,6 +46,15 @@ impl Proto {
         matches!(self, Self::Tcp6 | Self::Udp6)
     }
 
+    /// The transport, for looking a port up in `/etc/services`.
+    #[must_use]
+    pub const fn transport(self) -> crate::services::Proto {
+        match self {
+            Self::Tcp | Self::Tcp6 => crate::services::Proto::Tcp,
+            Self::Udp | Self::Udp6 => crate::services::Proto::Udp,
+        }
+    }
+
     /// Human label.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -222,7 +231,7 @@ fn parse_endpoint(s: &str, v6: bool) -> Option<(IpAddr, u16)> {
         for word in 0..4 {
             let hex = &addr[word * 8..word * 8 + 8];
             let w = u32::from_str_radix(hex, 16).ok()?;
-            octets[word * 4..word * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            octets[word * 4..word * 4 + 4].copy_from_slice(&w.to_ne_bytes());
         }
         Some((IpAddr::V6(Ipv6Addr::from(octets)), port))
     } else {
@@ -230,7 +239,7 @@ fn parse_endpoint(s: &str, v6: bool) -> Option<(IpAddr, u16)> {
             return None;
         }
         let w = u32::from_str_radix(addr, 16).ok()?;
-        Some((IpAddr::V4(Ipv4Addr::from(w.to_le_bytes())), port))
+        Some((IpAddr::V4(Ipv4Addr::from(w.to_ne_bytes())), port))
     }
 }
 
@@ -238,7 +247,8 @@ fn parse_endpoint(s: &str, v6: bool) -> Option<(IpAddr, u16)> {
 mod tests {
     use super::*;
 
-    /// Real output from this kernel, captured verbatim.
+    /// A real kernel's output format, with documentation-range
+    /// addresses (RFC 5737) in place of any real host's.
     const TCP: &str = "\
   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 3500007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   101        0 24503 1 0000000000000000 100 0 0 10 0
@@ -287,9 +297,9 @@ mod tests {
 
     #[test]
     fn a_real_v6_address_is_not_byte_swapped_wholesale() {
-        // This host's actual address, encoded the way this kernel encodes
-        // it — captured, not derived. My first attempt at writing this
-        // constant by hand was wrong, which is the argument for the test:
+        // A full v6 address in the kernel's own encoding. The first
+        // attempt at writing this constant by hand was wrong, which is
+        // the argument for the test:
         // each 32-bit word is little-endian with the words left in order,
         // and both "reverse the whole thing" and "reverse nothing" produce
         // real-looking addresses that are silently a different host.

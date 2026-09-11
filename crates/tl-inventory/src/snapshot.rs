@@ -9,7 +9,9 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use crate::proc_net::{Proto, Socket, State, parse_table};
+use crate::ports::EphemeralPorts;
 use crate::procs::{Holder, Owner, holders_by_inode};
+use crate::services::ServiceNames;
 
 /// A socket plus who owns it.
 #[derive(Debug, Clone)]
@@ -43,6 +45,29 @@ impl Flow {
         self.socket.has_peer() && !is_local(self.socket.remote_addr)
     }
 
+    /// Whether this socket is somewhere the host accepts connections.
+    ///
+    /// Not the same as `state == Listen`. UDP never enters LISTEN — a UDP
+    /// service is just a bound socket with no peer — so counting only
+    /// LISTEN reported 102 listening ports on a host that also had a
+    /// resolver, mDNS, NTP and QUIC bound and serving. They were not
+    /// merely uncounted; they were absent from the view.
+    ///
+    /// The same shape describes a UDP client halfway through a query, and
+    /// on this host those outnumber the real services twenty to one. The
+    /// kernel's ephemeral range separates them: a port the kernel hands
+    /// out for outgoing traffic is a client's, anything else was bound
+    /// deliberately.
+    #[must_use]
+    pub fn accepts_connections(&self, ports: EphemeralPorts) -> bool {
+        match self.socket.proto {
+            Proto::Tcp | Proto::Tcp6 => self.socket.state == State::Listen,
+            Proto::Udp | Proto::Udp6 => {
+                !self.socket.has_peer() && ports.is_service_port(self.socket.local_port)
+            }
+        }
+    }
+
     /// Which way this connection was initiated.
     ///
     /// `/proc/net/tcp` does not record who dialled. Two things recover it:
@@ -66,9 +91,9 @@ impl Flow {
         if !self.socket.has_peer() && self.socket.state != State::SynRecv {
             return Direction::Idle;
         }
-        // Loopback is decided FIRST, and the order is the meaning. Put the
-        // listener check above it and the 41 localhost clients of redis on
-        // this host get reported as "something reached into this machine"
+        // Loopback is decided FIRST, and the order is the meaning. Put
+        // the listener check above it and every local client of a local
+        // database is reported as "something reached into this machine"
         // — the server side of a connection that never touched the NIC.
         // Nothing crossed an interface, so nothing is inbound.
         if is_local(self.socket.remote_addr) {
@@ -77,6 +102,22 @@ impl Flow {
         if self.socket.state == State::SynRecv
             || listening.accepts(self.socket.local_addr, self.socket.local_port)
         {
+            return Direction::Inbound;
+        }
+        // Last resort, for a socket that outlived the listener that made
+        // it. An accepted connection in TIME-WAIT survives its server
+        // being stopped; with the LISTEN row gone there is nothing left to
+        // match, and it would be announced as a place this machine chose
+        // to connect out to — a stranger's address in the destination
+        // lane, which is the exact lie this module exists to prevent.
+        //
+        // Narrow on purpose. It applies only to a socket the kernel holds
+        // with no file (inode 0: TIME-WAIT and SYN-RECV), because a live
+        // outbound connection has a process holding it. And it asks the
+        // kernel's own ephemeral range rather than assuming one: a local
+        // port the kernel would never hand out for an outgoing connection
+        // was bound deliberately, to serve on.
+        if self.socket.inode == 0 && listening.ports.is_service_port(self.socket.local_port) {
             return Direction::Inbound;
         }
         Direction::Outbound
@@ -124,12 +165,15 @@ impl Direction {
 #[derive(Debug, Default, Clone)]
 pub struct Listeners {
     by_port: HashMap<u16, Vec<IpAddr>>,
+    /// The kernel's outgoing-connection range, for the orphan rule in
+    /// [`Flow::direction`].
+    pub ports: EphemeralPorts,
 }
 
 impl Listeners {
     /// Build from a snapshot's LISTEN rows.
     #[must_use]
-    pub fn from_flows(flows: &[Flow]) -> Self {
+    pub fn from_flows(flows: &[Flow], ports: EphemeralPorts) -> Self {
         let mut by_port: HashMap<u16, Vec<IpAddr>> = HashMap::new();
         for f in flows.iter().filter(|f| f.socket.state == State::Listen) {
             let v = by_port.entry(f.socket.local_port).or_default();
@@ -137,7 +181,7 @@ impl Listeners {
                 v.push(f.socket.local_addr);
             }
         }
-        Self { by_port }
+        Self { by_port, ports }
     }
 
     /// True when a listener on this host would have accepted a connection
@@ -178,6 +222,101 @@ fn same_addr(a: IpAddr, b: IpAddr) -> bool {
         }
     }
     flat(a) == flat(b)
+}
+
+/// A service on this host that other local software connects through.
+///
+/// Detected, never listed. Earlier this lane was driven by a hardcoded
+/// port table — 9050 is Tor, 8118 is Privoxy, and so on. That table is
+/// wrong twice over: it covers only the software whoever wrote it thought
+/// of, so somebody's dnscrypt-proxy or shadowsocks or stunnel is simply
+/// absent; and it is confidently wrong whenever a host uses a port for
+/// something else.
+///
+/// What identifies a local service is that this machine LISTENS on the
+/// port. The process holding that listening socket is its name. The
+/// system's own `/etc/services` supplies a fallback label, and the port
+/// number is the last resort — so an unrecognised service still appears,
+/// rather than vanishing for want of an entry in somebody's list.
+#[derive(Debug, Clone)]
+pub struct LocalService {
+    pub port: u16,
+    pub proto: &'static str,
+    /// The process holding the listening socket, when it is visible.
+    pub actor: Option<String>,
+    pub kind: &'static str,
+    /// The name `/etc/services` gives this port, if any.
+    pub service: Option<String>,
+    /// Local connections into this port right now.
+    pub clients: usize,
+    /// Whether this service itself has connections leaving the machine.
+    ///
+    /// This is what separates a forwarding hop from a terminus, without
+    /// naming either: traffic into a proxy continues outward through that
+    /// proxy's own sockets, while traffic into a database stops there. A
+    /// list of "known proxy ports" cannot tell them apart on a host it
+    /// has never seen; this can.
+    pub forwards: bool,
+}
+
+/// Every port this host listens on, with who holds it and whether it
+/// forwards. See [`LocalService`].
+#[must_use]
+pub fn local_services(
+    flows: &[Flow],
+    names: &ServiceNames,
+    ports: EphemeralPorts,
+) -> Vec<LocalService> {
+    let mut out: Vec<LocalService> = Vec::new();
+    let mut egress: HashMap<String, bool> = HashMap::new();
+    let listening = Listeners::from_flows(flows, ports);
+    for f in flows {
+        if f.direction(&listening) == Direction::Outbound {
+            egress.insert(f.actor(), true);
+        }
+    }
+    let mut seen: HashMap<(u16, &'static str), usize> = HashMap::new();
+    // UDP never enters LISTEN — a UDP service is just a bound socket with
+    // no peer. Without this the single most common local hop of all, the
+    // DNS resolver, is absent from the view entirely.
+    //
+    // The same shape describes a UDP *client* socket mid-query, so this
+    // set is deliberately NOT the one `direction` consults: treating an
+    // ephemeral source port as a listener would relabel every reply as an
+    // inbound connection. Here it is harmless — nothing dials an
+    // ephemeral port, so those entries simply have no clients and the
+    // view drops them.
+    for f in flows.iter().filter(|f| f.accepts_connections(listening.ports)) {
+        let key = (f.socket.local_port, f.socket.proto.label());
+        if seen.contains_key(&key) {
+            continue;
+        }
+        seen.insert(key, out.len());
+        let actor = f.holder.as_ref().map(Holder::label);
+        out.push(LocalService {
+            port: f.socket.local_port,
+            proto: f.socket.proto.label(),
+            forwards: actor.as_ref().is_some_and(|a| egress.contains_key(a)),
+            kind: f.owner.kind(),
+            service: names
+                .name(f.socket.local_port, f.socket.proto.transport())
+                .map(ToOwned::to_owned),
+            actor,
+            clients: 0,
+        });
+    }
+    // Count the local software currently connected through each one.
+    for f in flows {
+        if f.direction(&listening) != Direction::Loopback || !f.socket.has_peer() {
+            continue;
+        }
+        for proto in [f.socket.proto.label()] {
+            if let Some(&i) = seen.get(&(f.socket.remote_port, proto)) {
+                out[i].clients += 1;
+            }
+        }
+    }
+    out
 }
 
 fn is_local(a: IpAddr) -> bool {
@@ -225,7 +364,20 @@ fn esc(s: &str) -> String {
             '\n' => o.push_str("\\n"),
             '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                o.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            // Bidirectional and invisible formatting controls. A process
+            // names itself, and U+202E reverses everything after it, so a
+            // name can render as a different name than the one the kernel
+            // holds. For a view whose only claim is that what it shows is
+            // true, a character that rewrites its neighbours is not a
+            // display detail.
+            c if matches!(c as u32,
+                          0x200b..=0x200f | 0x202a..=0x202e
+                          | 0x2060..=0x2064 | 0x2066..=0x206f | 0xfeff) => {
+                o.push_str(&format!("\\u{:04x}", c as u32));
+            }
             c => o.push(c),
         }
     }
@@ -234,8 +386,8 @@ fn esc(s: &str) -> String {
 
 /// Render flows as JSON for the UI.
 #[must_use]
-pub fn to_json(flows: &[Flow]) -> String {
-    let listening = &Listeners::from_flows(flows);
+pub fn to_json(flows: &[Flow], names: &ServiceNames, ports: EphemeralPorts) -> String {
+    let listening = &Listeners::from_flows(flows, ports);
     let mut s = String::from("{\"flows\":[");
     for (i, f) in flows.iter().enumerate() {
         if i > 0 {
@@ -260,8 +412,25 @@ pub fn to_json(flows: &[Flow]) -> String {
             f.holder.as_ref().map_or(0, |h| h.pid),
             esc(f.holder.as_ref().and_then(|h| h.exe.as_deref()).unwrap_or("")),
             f.direction(listening) == Direction::Outbound,
-            sk.state == State::Listen,
+            f.accepts_connections(ports),
             f.direction(listening).tag(),
+        ));
+    }
+    s.push_str("],\"services\":[");
+    for (i, v) in local_services(flows, names, ports).iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "{{\"port\":{},\"proto\":\"{}\",\"actor\":\"{}\",\"kind\":\"{}\",\
+             \"service\":\"{}\",\"clients\":{},\"forwards\":{}}}",
+            v.port,
+            v.proto,
+            esc(v.actor.as_deref().unwrap_or("")),
+            v.kind,
+            esc(v.service.as_deref().unwrap_or("")),
+            v.clients,
+            v.forwards,
         ));
     }
     s.push_str("]}");
@@ -283,6 +452,9 @@ mod tests {
     use super::*;
     use crate::proc_net::Proto;
     use std::net::Ipv4Addr;
+
+    /// The kernel default, so a test does not depend on the host it runs on.
+    const EP: EphemeralPorts = EphemeralPorts { low: 32768, high: 60999 };
 
     fn sock(remote: [u8; 4], port: u16, state: State) -> Socket {
         Socket {
@@ -339,7 +511,7 @@ mod tests {
             }),
             owner: Owner::Process,
         };
-        let j = to_json(&[f]);
+        let j = to_json(&[f], &ServiceNames::default(), EP);
         assert!(j.contains(r#"\"name\\with\nnewline"#), "{j}");
         assert_eq!(j.matches("\"actor\"").count(), 1);
     }
@@ -354,7 +526,7 @@ mod tests {
             at("0.0.0.0", 443, "0.0.0.0", State::Listen),
             at("203.0.113.7", 443, "198.51.100.24", State::Established),
         ];
-        let l = Listeners::from_flows(&flows);
+        let l = Listeners::from_flows(&flows, EP);
         assert_eq!(flows[1].direction(&l), Direction::Inbound);
         assert!(flows[1].leaves_host(), "peer really is off-box");
     }
@@ -365,7 +537,7 @@ mod tests {
             at("0.0.0.0", 443, "0.0.0.0", State::Listen),
             at("203.0.113.7", 55372, "1.1.1.1", State::Established),
         ];
-        let l = Listeners::from_flows(&flows);
+        let l = Listeners::from_flows(&flows, EP);
         assert_eq!(flows[1].direction(&l), Direction::Outbound);
     }
 
@@ -387,7 +559,7 @@ mod tests {
             at("127.0.0.1", 8080, "0.0.0.0", State::Listen),
             at("203.0.113.7", 8080, "1.1.1.1", State::Established),
         ];
-        let l = Listeners::from_flows(&flows);
+        let l = Listeners::from_flows(&flows, EP);
         assert_eq!(flows[1].direction(&l), Direction::Outbound);
         assert!(l.accepts("127.0.0.1".parse().unwrap(), 8080));
     }
@@ -401,7 +573,7 @@ mod tests {
             at("::", 443, "::", State::Listen),
             at("::ffff:203.0.113.7", 443, "::ffff:198.51.100.24", State::Established),
         ];
-        let l = Listeners::from_flows(&flows);
+        let l = Listeners::from_flows(&flows, EP);
         assert_eq!(flows[1].direction(&l), Direction::Inbound);
     }
 
@@ -415,15 +587,16 @@ mod tests {
 
     #[test]
     fn a_localhost_client_of_a_local_server_is_loopback_not_inbound() {
-        // The server side of a redis connection from 127.0.0.1: we do
-        // listen on 6379, but nothing crossed an interface, so calling it
-        // inbound would report a stranger where there is none. 41 rows on
-        // this host land here.
+        // The server side of a connection from 127.0.0.1 to a local
+        // database: the host does listen on that port, but nothing
+        // crossed an interface, so calling it inbound would report a
+        // stranger where there is none. On a development host, 41 of 113
+        // apparently-inbound rows were this.
         let flows = vec![
             at("0.0.0.0", 6379, "0.0.0.0", State::Listen),
             at("127.0.0.1", 6379, "127.0.0.1", State::Established),
         ];
-        let l = Listeners::from_flows(&flows);
+        let l = Listeners::from_flows(&flows, EP);
         assert_eq!(flows[1].direction(&l), Direction::Loopback);
         assert!(!flows[1].leaves_host());
     }
@@ -443,7 +616,7 @@ mod tests {
             at("203.0.113.7", 443, "198.51.100.24", State::Established),
             at("203.0.113.7", 55372, "1.1.1.1", State::Established),
         ];
-        let j = to_json(&flows);
+        let j = to_json(&flows, &ServiceNames::default(), EP);
         assert_eq!(j.matches("\"dir\":\"inbound\"").count(), 1, "{j}");
         assert_eq!(j.matches("\"dir\":\"outbound\"").count(), 1, "{j}");
         assert_eq!(j.matches("\"dir\":\"listening\"").count(), 1, "{j}");
@@ -452,8 +625,203 @@ mod tests {
         assert_eq!(j.matches("\"leaves\":true").count(), 1, "{j}");
     }
 
+    fn held(mut f: Flow, comm: &str, owner: Owner) -> Flow {
+        f.holder = Some(Holder {
+            pid: 7,
+            comm: comm.to_owned(),
+            exe: None,
+            owner: owner.clone(),
+        });
+        f.owner = owner;
+        f
+    }
+
+    #[test]
+    fn a_local_service_is_detected_from_the_listener_not_a_port_list() {
+        // The port here is deliberately one no hardcoded "well-known
+        // proxies" table would contain. What identifies the service is
+        // that this host listens on it and a process holds the socket.
+        let flows = vec![
+            held(at("127.0.0.1", 47821, "0.0.0.0", State::Listen),
+                 "dnscrypt-proxy", Owner::Service("dnscrypt-proxy".to_owned())),
+            at("127.0.0.1", 55000, "127.0.0.1", State::Established),
+        ];
+        let svc = local_services(&flows, &ServiceNames::default(), EP);
+        assert_eq!(svc.len(), 1);
+        assert_eq!(svc[0].port, 47821);
+        assert_eq!(svc[0].actor.as_deref(), Some("dnscrypt-proxy"));
+        assert_eq!(svc[0].service, None, "no /etc/services entry, still listed");
+    }
+
+    #[test]
+    fn a_forwarder_is_told_apart_from_a_terminus_by_its_own_egress() {
+        // A proxy has connections leaving the machine; a database does
+        // not. Neither is named, and neither needs to be.
+        let proxy = held(at("127.0.0.1", 9050, "0.0.0.0", State::Listen),
+                         "tor", Owner::Service("tor".to_owned()));
+        let proxy_out = held(at("10.0.0.1", 51000, "198.51.100.9", State::Established),
+                             "tor", Owner::Service("tor".to_owned()));
+        let db = held(at("127.0.0.1", 5432, "0.0.0.0", State::Listen),
+                      "postgres", Owner::Service("postgres".to_owned()));
+        let svc = local_services(&[proxy, proxy_out, db], &ServiceNames::default(), EP);
+        let by_port = |p: u16| svc.iter().find(|s| s.port == p).unwrap();
+        assert!(by_port(9050).forwards, "tor's traffic continues outward");
+        assert!(!by_port(5432).forwards, "postgres is where traffic stops");
+    }
+
+    #[test]
+    fn the_system_services_file_supplies_a_label_when_no_process_is_visible() {
+        // Running unprivileged, another user's process is invisible, but
+        // the listening socket still is. A name from the host's own
+        // /etc/services beats showing a bare number.
+        let names = ServiceNames::parse("ssh 22/tcp\n");
+        let svc = local_services(&[at("0.0.0.0", 22, "0.0.0.0", State::Listen)], &names, EP);
+        assert_eq!(svc[0].actor, None);
+        assert_eq!(svc[0].service.as_deref(), Some("ssh"));
+    }
+
+    #[test]
+    fn clients_are_counted_from_the_loopback_connections_into_the_port() {
+        let flows = vec![
+            held(at("127.0.0.1", 9050, "0.0.0.0", State::Listen),
+                 "tor", Owner::Service("tor".to_owned())),
+            at("127.0.0.1", 41000, "127.0.0.1", State::Established),
+            at("127.0.0.1", 41001, "127.0.0.1", State::Established),
+        ];
+        // Both client sockets are dialling 9050.
+        let mut flows = flows;
+        flows[1].socket.remote_port = 9050;
+        flows[2].socket.remote_port = 9050;
+        let svc = local_services(&flows, &ServiceNames::default(), EP);
+        assert_eq!(svc[0].clients, 2);
+    }
+
+    #[test]
+    fn a_udp_service_is_found_even_though_udp_never_listens() {
+        // /proc/net/udp has no LISTEN state; a resolver's socket is just
+        // bound with no peer. Requiring State::Listen hid DNS — the most
+        // common local hop there is — from the view completely.
+        let mut resolver = at("127.0.0.53", 53, "0.0.0.0", State::Close);
+        resolver.socket.proto = Proto::Udp;
+        resolver.socket.remote_port = 0;
+        let mut client = at("127.0.0.1", 41000, "127.0.0.53", State::Established);
+        client.socket.proto = Proto::Udp;
+        client.socket.remote_port = 53;
+        let names = ServiceNames::parse("domain 53/udp\n");
+        let svc = local_services(&[resolver, client], &names, EP);
+        let dns = svc.iter().find(|s| s.port == 53).expect("resolver detected");
+        assert_eq!(dns.service.as_deref(), Some("domain"));
+        assert_eq!(dns.clients, 1);
+    }
+
+    #[test]
+    fn a_udp_client_port_is_never_treated_as_a_listener_for_direction() {
+        // The same "bound, no peer" shape describes a client mid-query.
+        // It may appear in the service list (harmlessly, with no clients)
+        // but it must NOT make the reply look like an inbound connection.
+        let mut ephemeral = at("10.0.0.1", 41000, "0.0.0.0", State::Close);
+        ephemeral.socket.proto = Proto::Udp;
+        ephemeral.socket.remote_port = 0;
+        let mut reply = at("10.0.0.1", 41000, "198.51.100.9", State::Established);
+        reply.socket.proto = Proto::Udp;
+        let flows = vec![ephemeral, reply];
+        let l = Listeners::from_flows(&flows, EP);
+        assert_eq!(flows[1].direction(&l), Direction::Outbound,
+                   "a UDP reply is not somebody connecting in");
+        // Better than "listed with no clients": the kernel's own range
+        // says 41000 is a port it hands out for outgoing traffic, so it
+        // is not a service at all and never reaches the view. On this
+        // host that is the difference between 11 services and 216.
+        let svc = local_services(&flows, &ServiceNames::default(), EP);
+        assert!(svc.iter().all(|s| s.port != 41000), "client port listed as a service");
+        assert!(!flows[0].accepts_connections(EP));
+    }
+
+    #[test]
+    fn json_carries_the_detected_services() {
+        let names = ServiceNames::parse("ssh 22/tcp\n");
+        let flows = vec![held(at("0.0.0.0", 22, "0.0.0.0", State::Listen),
+                              "sshd", Owner::Service("ssh".to_owned()))];
+        let j = to_json(&flows, &names, EP);
+        assert!(j.contains(r#""service":"ssh""#), "{j}");
+        assert!(j.contains(r#""actor":"sshd (ssh)""#), "{j}");
+        assert!(j.contains(r#""forwards":false"#), "{j}");
+    }
+
+    #[test]
+    fn a_name_cannot_rewrite_the_text_around_it() {
+        // U+202E (RIGHT-TO-LEFT OVERRIDE) reverses the rendering of what
+        // follows, so a process could name itself so that the screen
+        // shows something other than what the kernel reports. The tool's
+        // only claim is that what it shows is true.
+        let f = Flow {
+            socket: sock([1, 1, 1, 1], 443, State::Established),
+            holder: Some(Holder {
+                pid: 1,
+                comm: "gpj.\u{202e}exe-erawlam".to_owned(),
+                exe: None,
+                owner: Owner::Process,
+            }),
+            owner: Owner::Process,
+        };
+        let j = to_json(&[f], &ServiceNames::default(), EP);
+        assert!(!j.contains('\u{202e}'), "raw override reached the UI");
+        assert!(j.contains("\\u202e"), "{j}");
+        // Zero-width characters hide a difference between two names.
+        assert_eq!(esc("a\u{200b}b"), "a\\u200bb");
+        assert_eq!(esc("a\u{feff}b"), "a\\ufeffb");
+        assert_eq!(esc("plain text"), "plain text", "ordinary names untouched");
+    }
+
+    #[test]
+    fn an_orphaned_server_socket_is_still_inbound_after_its_listener_stops() {
+        // An accepted connection in TIME-WAIT outlives the server being
+        // stopped. With no LISTEN row left to match, it would be shown as
+        // somewhere this machine chose to connect out to — a stranger's
+        // address in the destination lane.
+        let mut f = at("10.0.0.1", 443, "198.51.100.9", State::TimeWait);
+        f.socket.inode = 0; // the kernel holds it; no process does
+        assert_eq!(f.direction(&Listeners::from_flows(&[], EP)), Direction::Inbound);
+    }
+
+    #[test]
+    fn an_orphan_on_an_ephemeral_port_is_still_outbound() {
+        // The mirror case, and the reason the rule is narrow: TIME-WAIT
+        // from a connection WE made has a local port the kernel handed
+        // out. Treating every orphan as inbound would re-create the bug
+        // in the other direction.
+        let mut f = at("10.0.0.1", 41000, "198.51.100.9", State::TimeWait);
+        f.socket.inode = 0;
+        assert!(EP.is_ephemeral(41000));
+        assert_eq!(f.direction(&Listeners::from_flows(&[], EP)), Direction::Outbound);
+    }
+
+    #[test]
+    fn a_live_outbound_connection_is_never_caught_by_the_orphan_rule() {
+        // Gated on inode 0 precisely so a real connection held by a real
+        // process cannot be reinterpreted, whatever port it bound.
+        let mut f = at("10.0.0.1", 443, "198.51.100.9", State::Established);
+        f.socket.inode = 4242;
+        assert_eq!(f.direction(&Listeners::from_flows(&[], EP)), Direction::Outbound);
+    }
+
+    #[test]
+    fn a_udp_service_counts_as_accepting_and_a_udp_client_does_not() {
+        let mut resolver = at("127.0.0.53", 53, "0.0.0.0", State::Close);
+        resolver.socket.proto = Proto::Udp;
+        resolver.socket.remote_port = 0;
+        let mut client = at("10.0.0.1", 45123, "0.0.0.0", State::Close);
+        client.socket.proto = Proto::Udp;
+        client.socket.remote_port = 0;
+        assert!(resolver.accepts_connections(EP), "a resolver is accepting");
+        assert!(!client.accepts_connections(EP), "a query in flight is not");
+        // TCP keeps the strict rule: only LISTEN accepts.
+        assert!(at("0.0.0.0", 443, "0.0.0.0", State::Listen).accepts_connections(EP));
+        assert!(!at("10.0.0.1", 443, "198.51.100.9", State::Established).accepts_connections(EP));
+    }
+
     #[test]
     fn an_empty_snapshot_is_still_valid_json() {
-        assert_eq!(to_json(&[]), "{\"flows\":[]}");
+        assert_eq!(to_json(&[], &ServiceNames::default(), EP), "{\"flows\":[],\"services\":[]}");
     }
 }

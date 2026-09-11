@@ -37,8 +37,8 @@
 
   .stage{overflow:auto;padding:1.1rem 1.2rem}
   .hint{color:var(--dim);font-size:.74rem;padding:0 0 .7rem}
-  .lanes{display:grid;grid-template-columns:repeat(5,minmax(9.5rem,1fr));
-         gap:0 2.2rem;min-width:54rem;position:relative}
+  .lanes{display:grid;grid-template-columns:repeat(5,minmax(11rem,1fr));
+         gap:0 2.2rem;min-width:62rem;position:relative}
   /* The wire layer sits UNDER the nodes so a curve never covers a label,
      and ignores pointer events so a click still reaches the node. */
   #wires{position:absolute;inset:0;pointer-events:none;z-index:0;overflow:visible}
@@ -60,6 +60,10 @@
   .node.container{border-left:3px solid var(--container)}
   .node.unowned,.node.process{border-left:3px solid var(--unowned)}
   .node.hop{border-left:3px solid var(--wire);text-align:center}
+  /* A service with egress of its own is the interesting case — traffic
+     into it may continue off the machine — so it is marked, not ranked. */
+  .node.fwd{border-left:3px solid var(--hot);text-align:center}
+  .node .note{opacity:.75;font-style:italic}
   .node.hop .n{font-weight:600}
   .empty{color:var(--dim);font-size:.78rem;font-style:italic;padding:.4rem 0}
 
@@ -102,7 +106,7 @@
       <svg id="wires"></svg>
       <div class="lane"><div class="lane-title">Device</div><div id="l-device"></div></div>
       <div class="lane"><div class="lane-title">Software</div><div id="l-software"></div></div>
-      <div class="lane"><div class="lane-title">Local hop</div><div id="l-proxy"></div></div>
+      <div class="lane"><div class="lane-title">Local service</div><div id="l-proxy"></div></div>
       <div class="lane"><div class="lane-title">Interface</div><div id="l-nic"></div></div>
       <div class="lane"><div class="lane-title">Destination</div><div id="l-dest"></div></div>
     </div>
@@ -130,11 +134,16 @@
 const $ = id => document.getElementById(id);
 const SVGNS = 'http://www.w3.org/2000/svg';
 
-// Local ports worth calling out by name: an app talking to one of these is
-// the first hop of a path, not a destination.
-const HOPS = {9050:'Tor SOCKS',9051:'Tor control',9040:'Tor trans',
-              8118:'Privoxy',1080:'SOCKS',3128:'HTTP proxy',
-              53:'DNS',5353:'mDNS'};
+// Local services are DETECTED, not listed. /api/snapshot reports every
+// port this host listens on, who holds it, what /etc/services calls it,
+// and whether it has egress of its own. Nothing here knows what Tor is.
+let services = {};
+
+function serviceLabel(port){
+  const v = services[port];
+  if (!v) return 'port ' + port;
+  return v.actor || v.service || 'port ' + port;
+}
 
 const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 
@@ -144,6 +153,22 @@ const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 const LANE_CAP = 20;
 function overflow(lane, hidden){
   if (hidden > 0) lane.appendChild(el('div','empty', '+ ' + hidden + ' more not shown'));
+}
+
+// Same rule for the tables. These are where someone goes to check a
+// specific connection, so stopping at a fixed count without saying so is
+// the worst place to do it — and the sort key is a process name, which a
+// process chooses for itself.
+const TABLE_CAP = 200;
+function tableNote(body, hidden, emptyText){
+  if (body.children.length && hidden <= 0) return;
+  const tr = el('tr');
+  const td = el('td', 'muted', body.children.length
+    ? '+ ' + hidden + ' more not shown'
+    : emptyText);
+  td.colSpan = 4;
+  tr.appendChild(td);
+  body.appendChild(tr);
 }
 
 // Which node the user is following, kept across the 3s refresh — a poll
@@ -158,12 +183,13 @@ function el(tag, cls, txt){
   return e;
 }
 
-function node(id, cls, name, meta){
+function node(id, cls, name, meta, note){
   const d = el('div', 'node ' + cls);
   d.dataset.id = id;
-  d.title = name + (meta ? ' — ' + meta : '');
+  d.title = [name, meta, note].filter(Boolean).join(' — ');
   d.appendChild(el('div','n',name));
   if (meta) d.appendChild(el('div','m',meta));
+  if (note) d.appendChild(el('div','m note',note));
   d.addEventListener('click', () => {
     selected = (selected === id) ? null : id;
     paint();
@@ -202,13 +228,6 @@ function build(flows){
     }
   };
 
-  // Who owns each local hop port, so "Tor SOCKS" can say whose it is.
-  // The server side of a loopback connection is the listener, so read the
-  // actor off a flow whose LOCAL port is the hop port.
-  const hopOwner = {};
-  for (const f of flows){
-    if (HOPS[f.lport] && f.actor !== 'unattributed') hopOwner[f.lport] = f.actor;
-  }
 
   const sw = new Map();
   const bump = (f) => {
@@ -216,7 +235,7 @@ function build(flows){
     return sw.get(f.actor);
   };
   for (const f of out)  bump(f).out++;
-  for (const f of loop) if (HOPS[f.rport]) bump(f).hop++;
+  for (const f of loop) if (services[f.rport]) bump(f).hop++;
 
   const hops = new Map(), nics = new Map(), dest = new Map();
   for (const f of out){
@@ -226,21 +245,23 @@ function build(flows){
   }
   const usesHop = new Set();
   for (const f of loop){
-    const label = HOPS[f.rport];
-    if (!label) continue;
+    if (!services[f.rport]) continue;      // not a port this host serves
+    const label = serviceLabel(f.rport);
     if (!hops.has(label)) hops.set(label, {n:0, port:f.rport});
     hops.get(label).n++;
     add(f.kind, 'dev:host', 'sw:'+f.actor, 'hop:'+label);
     usesHop.add(f.actor + '\u0000' + label + '\u0000' + f.rport + '\u0000' + f.kind);
   }
-  // An app that reaches a local hop continues out through the process
-  // that OWNS the hop — its traffic really does leave via tor's sockets,
-  // and drawing the break would hide the one link the tool exists to
-  // show. One chain per (app, hop, egress) rather than per flow pair,
+  // An app that reaches a local service continues out through that
+  // service's own sockets — but ONLY if the service actually has egress.
+  // The snapshot reports that as `forwards`, measured per service, so a
+  // proxy is told apart from a database without either being named.
+  // One chain per (app, service, egress) rather than per flow pair,
   // which would multiply out to thousands.
   for (const use of usesHop){
     const [actor, label, port, kind] = use.split('\u0000');
-    const owner = hopOwner[port];
+    const svc = services[port];
+    const owner = svc && svc.forwards ? svc.actor : null;
     if (!owner || owner === actor) continue;
     const egress = new Set();
     for (const f of out){
@@ -256,7 +277,7 @@ function build(flows){
     if (!paths.some(p => p[1] === 'sw:'+name)) add(v.kind, 'dev:host', 'sw:'+name);
   }
 
-  graph = { edges: [...seen.values()], paths, sw, hops, nics, dest, hopOwner };
+  graph = { edges: [...seen.values()], paths, sw, hops, nics, dest };
   return graph;
 }
 
@@ -288,6 +309,8 @@ function render(data){
   const inbound   = flows.filter(f => f.dir === 'inbound');
   const loopback  = flows.filter(f => f.dir === 'loopback');
   const listening = flows.filter(f => f.listening);
+  services = {};
+  for (const v of data.services || []) services[v.port] = v;
   const g = build(flows);
 
   const kinds = {};
@@ -322,20 +345,26 @@ function render(data){
   const swAll = [...g.sw.entries()].sort((a,b)=>(b[1].out+b[1].hop)-(a[1].out+a[1].hop));
   swAll.slice(0,LANE_CAP).forEach(([name,v])=>{
     const bits = [];
-    if (v.out) bits.push(plural(v.out,'connection'));
-    if (v.hop) bits.push(plural(v.hop,'local hop'));
-    if (v.pid) bits.push('pid '+v.pid);
-    sw.appendChild(node('sw:'+name, v.kind, name, bits.join(' · ')));
+    // Counts, not pluralised nouns: "96 locals" and "4 outs" both read
+    // as gibberish, and the lane is too narrow for the full phrase.
+    if (v.out) bits.push(v.out + ' outbound');
+    if (v.hop) bits.push(v.hop + ' local');
+    sw.appendChild(node('sw:'+name, v.kind, name, bits.join(' · '),
+                        v.pid ? 'pid ' + v.pid : null));
   });
   overflow(sw, swAll.length - LANE_CAP);
 
   const pl = $('l-proxy'); pl.replaceChildren();
   if (!g.hops.size) pl.appendChild(el('div','empty','none detected'));
-  [...g.hops.entries()].sort((a,b)=>b[1].n-a[1].n).forEach(([name,o])=>{
-    const owner = g.hopOwner[o.port];
-    pl.appendChild(node('hop:'+name,'hop', name,
-      plural(o.n,'connection') + (owner ? ' · ' + owner : '')));
+  [...g.hops.entries()].sort((a,b)=>b[1].n-a[1].n).slice(0,LANE_CAP).forEach(([name,o])=>{
+    const v = services[o.port] || {};
+    // Said in words, not implied by a colour: whether traffic that
+    // reaches this service goes any further.
+    pl.appendChild(node('hop:'+name, v.forwards ? 'fwd' : 'hop', name,
+      ':' + o.port + ' · ' + plural(o.n,'connection'),
+      v.forwards ? 'has egress of its own' : 'traffic stops here'));
   });
+  overflow(pl, g.hops.size - LANE_CAP);
 
   const nl = $('l-nic'); nl.replaceChildren();
   if (!g.nics.size) nl.appendChild(el('div','empty','—'));
@@ -350,7 +379,7 @@ function render(data){
   overflow(dl, dAll.length - LANE_CAP);
 
   const rows = $('rows'); rows.replaceChildren();
-  leaving.slice().sort((a,b)=>a.actor.localeCompare(b.actor)).slice(0,200).forEach(f=>{
+  leaving.slice().sort((a,b)=>a.actor.localeCompare(b.actor)).slice(0,TABLE_CAP).forEach(f=>{
     const tr = el('tr');
     const a = el('td', null, f.actor); a.title = f.exe || f.actor;
     tr.appendChild(a);
@@ -360,13 +389,10 @@ function render(data){
     tr.appendChild(el('td','muted',f.state));
     rows.appendChild(tr);
   });
-  if (!leaving.length){
-    const tr = el('tr'); const td = el('td','muted','nothing leaving this machine');
-    td.colSpan = 4; tr.appendChild(td); rows.appendChild(tr);
-  }
+  tableNote(rows, leaving.length - TABLE_CAP, 'nothing leaving this machine');
 
   const irows = $('inrows'); irows.replaceChildren();
-  inbound.slice().sort((a,b)=>a.lport-b.lport).slice(0,200).forEach(f=>{
+  inbound.slice().sort((a,b)=>a.lport-b.lport).slice(0,TABLE_CAP).forEach(f=>{
     const tr = el('tr');
     tr.appendChild(el('td',null,String(f.lport)));
     const r = el('td', null, f.remote); r.title = f.remote;
@@ -376,10 +402,7 @@ function render(data){
     tr.appendChild(el('td','muted',f.state));
     irows.appendChild(tr);
   });
-  if (!inbound.length){
-    const tr = el('tr'); const td = el('td','muted','nothing reaching in');
-    td.colSpan = 4; tr.appendChild(td); irows.appendChild(tr);
-  }
+  tableNote(irows, inbound.length - TABLE_CAP, 'nothing reaching in');
 
   paint();
 }

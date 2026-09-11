@@ -167,15 +167,27 @@ pub fn holders_by_inode(root: &Path) -> HashMap<u64, Holder> {
             .map(|b| classify_cgroup(&b))
             .unwrap_or(Owner::Process);
         for inode in inodes {
-            map.insert(
-                inode,
-                Holder {
-                    pid,
-                    comm: comm.clone(),
-                    exe: exe.clone(),
-                    owner: owner.clone(),
-                },
-            );
+            // One socket, several processes: a prefork server's master and
+            // its workers all hold the listening inode after fork. Plain
+            // `insert` let whichever pid `read_dir` yielded last win, so
+            // the displayed owner changed between two scans of an
+            // unchanged machine and the pid pointed at a worker that was
+            // about to be recycled. Lowest pid wins — it is stable, and
+            // for a forking server it is the parent.
+            let replace = map
+                .get(&inode)
+                .is_none_or(|existing: &Holder| pid < existing.pid);
+            if replace {
+                map.insert(
+                    inode,
+                    Holder {
+                        pid,
+                        comm: comm.clone(),
+                        exe: exe.clone(),
+                        owner: owner.clone(),
+                    },
+                );
+            }
         }
     }
     map
@@ -229,7 +241,7 @@ mod tests {
 
     #[test]
     fn a_system_service_is_named_by_its_unit() {
-        // Real cgroup line from this host.
+        // The shape a systemd service really has.
         let o = classify_cgroup("0::/system.slice/nginx.service\n");
         assert_eq!(o, Owner::Service("nginx".to_owned()));
         assert_eq!(o.kind(), "service");
@@ -317,6 +329,29 @@ mod tests {
             owner: Owner::Service("site-metrics".to_owned()),
         };
         assert_eq!(h.label(), "python3 (site-metrics)");
+    }
+
+    #[test]
+    fn a_socket_held_by_several_processes_resolves_the_same_way_every_scan() {
+        // A forking server's master and workers all hold the listening
+        // inode. Whichever process `read_dir` happened to yield last used
+        // to win, so the owner shown flipped between scans of a machine
+        // that had not changed, and the pid often named a worker about to
+        // exit. Directory order is not sorted, so this is checked by
+        // building the map in both orders.
+        let dir = std::env::temp_dir().join(format!("tl-proc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (pid, comm) in [(2000_u32, "nginx"), (1000_u32, "nginx")] {
+            let pd = dir.join(pid.to_string());
+            fs::create_dir_all(pd.join("fd")).unwrap();
+            fs::write(pd.join("comm"), format!("{comm}\n")).unwrap();
+            fs::write(pd.join("cgroup"), "0::/system.slice/nginx.service\n").unwrap();
+            // A symlink is what /proc/<pid>/fd really holds.
+            std::os::unix::fs::symlink("socket:[5000]", pd.join("fd").join("3")).unwrap();
+        }
+        let map = holders_by_inode(&dir);
+        assert_eq!(map[&5000].pid, 1000, "lowest pid, not last-scanned");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
