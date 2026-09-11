@@ -1,0 +1,12 @@
+[package]
+name = "tl-serve"
+version = "0.1.0"
+description = "Local-only web UI showing what is talking to the network and by what path."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tl-inventory = { path = "../tl-inventory" }

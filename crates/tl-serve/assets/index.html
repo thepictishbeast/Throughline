@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Throughline</title>
+<style>
+  :root{
+    --bg:#0e1013; --panel:#161a1f; --line:#242a31; --ink:#e6e9ee; --dim:#8b94a3;
+    --app:#7ec8ff; --service:#9d8cff; --container:#ffc46b; --unowned:#6b7280;
+    --process:#6b7280;
+    --wire:#2f3742; --hot:#5ee6a8; --warn:#ff8f6b;
+    --mono:ui-monospace,SFMono-Regular,Menlo,"Cascadia Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;
+         padding:.9rem 1.2rem;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:1rem;font-weight:600;letter-spacing:.02em}
+  .sub{color:var(--dim);font-size:.82rem}
+  .counts{margin-left:auto;display:flex;gap:.9rem;font-size:.82rem;flex-wrap:wrap}
+  .counts b{font-weight:600}
+  .dot{display:inline-block;width:.55rem;height:.55rem;border-radius:50%;
+       margin-right:.35rem;vertical-align:baseline}
+  .dot.app{background:var(--app)} .dot.service{background:var(--service)}
+  .dot.container{background:var(--container)} .dot.unowned{background:var(--unowned)}
+  .dot.process{background:var(--process)}
+  .dirs{display:flex;gap:.9rem;font-size:.82rem;flex-wrap:wrap;width:100%;
+        padding-top:.25rem;color:var(--dim)}
+  .dirs b{color:var(--ink);font-weight:600}
+  .dirs .out b{color:var(--hot)} .dirs .in b{color:var(--warn)}
+
+  main{display:grid;grid-template-columns:minmax(0,1fr) 26rem;gap:0;
+       height:calc(100vh - 4.9rem)}
+  @media (max-width:880px){main{grid-template-columns:1fr;height:auto}}
+
+  .stage{overflow:auto;padding:1.1rem 1.2rem}
+  .hint{color:var(--dim);font-size:.74rem;padding:0 0 .7rem}
+  .lanes{display:grid;grid-template-columns:repeat(5,minmax(9.5rem,1fr));
+         gap:0 2.2rem;min-width:54rem;position:relative}
+  /* The wire layer sits UNDER the nodes so a curve never covers a label,
+     and ignores pointer events so a click still reaches the node. */
+  #wires{position:absolute;inset:0;pointer-events:none;z-index:0;overflow:visible}
+  .lane{position:relative;z-index:1;min-width:0}
+  .lane-title{font-size:.7rem;letter-spacing:.09em;text-transform:uppercase;
+              color:var(--dim);padding-bottom:.5rem;border-bottom:1px solid var(--line);
+              margin-bottom:.7rem}
+  .node{background:var(--panel);border:1px solid var(--line);border-radius:7px;
+        padding:.5rem .6rem;margin-bottom:.5rem;cursor:pointer;
+        transition:opacity .12s,border-color .12s}
+  .node.sel{border-color:var(--hot);box-shadow:0 0 0 1px var(--hot) inset}
+  .node.dim{opacity:.22}
+  .node .n{font-weight:600;font-size:.82rem;overflow:hidden;text-overflow:ellipsis;
+           white-space:nowrap}
+  .node .m{color:var(--dim);font-size:.72rem;font-family:var(--mono);
+           overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .node.app{border-left:3px solid var(--app)}
+  .node.service{border-left:3px solid var(--service)}
+  .node.container{border-left:3px solid var(--container)}
+  .node.unowned,.node.process{border-left:3px solid var(--unowned)}
+  .node.hop{border-left:3px solid var(--wire);text-align:center}
+  .node.hop .n{font-weight:600}
+  .empty{color:var(--dim);font-size:.78rem;font-style:italic;padding:.4rem 0}
+
+  aside{border-left:1px solid var(--line);overflow:auto;padding:1.1rem}
+  aside h2{margin:0 0 .6rem;font-size:.75rem;letter-spacing:.09em;
+           text-transform:uppercase;color:var(--dim)}
+  aside h2.second{margin-top:1.4rem}
+  table{width:100%;table-layout:fixed;border-collapse:collapse;
+        font-family:var(--mono);font-size:.72rem}
+  /* table-layout:fixed is what makes the ellipsis work: without it the
+     cells size to their content and a long IPv6 address pushes the last
+     column past the panel edge, where it is silently cut off. */
+  col.actor{width:36%} col.addr{width:34%} col.proto{width:11%} col.state{width:19%}
+  /* State gets the wider slot: SYN-RECV and SYN-SENT differ by one word
+     and mean opposite directions, so truncating to "SYN-…" hides exactly
+     the distinction this view is built on. */
+  th{text-align:left;color:var(--dim);font-weight:500;padding:.25rem .3rem;
+     border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
+  td{padding:.25rem .3rem;border-bottom:1px solid #1b2026;
+     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  tr:hover td{background:#191e24}
+  .muted{color:var(--dim)}
+  footer{padding:.5rem 1.2rem;border-top:1px solid var(--line);color:var(--dim);
+         font-size:.74rem}
+  .err{color:var(--warn)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Throughline</h1>
+  <span class="sub" id="host">reading /proc…</span>
+  <div class="counts" id="counts"></div>
+  <div class="dirs" id="dirs"></div>
+</header>
+
+<main>
+  <section class="stage">
+    <div class="hint" id="hint">Click any node to follow one path. Click it again to clear.</div>
+    <div class="lanes" id="lanes">
+      <svg id="wires"></svg>
+      <div class="lane"><div class="lane-title">Device</div><div id="l-device"></div></div>
+      <div class="lane"><div class="lane-title">Software</div><div id="l-software"></div></div>
+      <div class="lane"><div class="lane-title">Local hop</div><div id="l-proxy"></div></div>
+      <div class="lane"><div class="lane-title">Interface</div><div id="l-nic"></div></div>
+      <div class="lane"><div class="lane-title">Destination</div><div id="l-dest"></div></div>
+    </div>
+  </section>
+
+  <aside>
+    <h2>Connections this machine opened</h2>
+    <table>
+      <colgroup><col class="actor"><col class="addr"><col class="proto"><col class="state"></colgroup>
+      <thead><tr><th>Actor</th><th>&rarr; Remote</th><th>Proto</th><th>State</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <h2 class="second">Reaching in from the network</h2>
+    <table>
+      <colgroup><col class="proto"><col class="addr"><col class="actor"><col class="state"></colgroup>
+      <thead><tr><th>Port</th><th>&larr; From</th><th>Listener</th><th>State</th></tr></thead>
+      <tbody id="inrows"></tbody>
+    </table>
+  </aside>
+</main>
+
+<footer id="foot">observe-only — nothing here changes a route</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const SVGNS = 'http://www.w3.org/2000/svg';
+
+// Local ports worth calling out by name: an app talking to one of these is
+// the first hop of a path, not a destination.
+const HOPS = {9050:'Tor SOCKS',9051:'Tor control',9040:'Tor trans',
+              8118:'Privoxy',1080:'SOCKS',3128:'HTTP proxy',
+              53:'DNS',5353:'mDNS'};
+
+const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+
+// A lane shows at most this many, and SAYS when it trimmed. Silently
+// dropping the tail would leave a node reading "9 connections" with six
+// wires drawn, which is the under-reporting this tool exists to avoid.
+const LANE_CAP = 20;
+function overflow(lane, hidden){
+  if (hidden > 0) lane.appendChild(el('div','empty', '+ ' + hidden + ' more not shown'));
+}
+
+// Which node the user is following, kept across the 3s refresh — a poll
+// that silently dropped the selection would make the view unusable.
+let selected = null;
+let graph = { edges: [] };
+
+function el(tag, cls, txt){
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt !== undefined) e.textContent = txt;
+  return e;
+}
+
+function node(id, cls, name, meta){
+  const d = el('div', 'node ' + cls);
+  d.dataset.id = id;
+  d.title = name + (meta ? ' — ' + meta : '');
+  d.appendChild(el('div','n',name));
+  if (meta) d.appendChild(el('div','m',meta));
+  d.addEventListener('click', () => {
+    selected = (selected === id) ? null : id;
+    paint();
+  });
+  return d;
+}
+
+// ---- the graph -------------------------------------------------------
+// Rebuilt from each snapshot. `kind` carries the colour so a drawn path
+// keeps the colour of the software that opened it rather than becoming
+// anonymous grey halfway across.
+//
+// Edges are DEDUPLICATED with a weight. Pushing one per flow drew 96
+// identical a mail filter→DNS curves stacked on the same pixels: 96 DOM nodes
+// that looked exactly like one, so the busiest link on the machine was
+// indistinguishable from the quietest. Counted instead, the weight sets
+// the stroke width and the number becomes visible.
+function build(flows){
+  const out  = flows.filter(f => f.dir === 'outbound');
+  const loop = flows.filter(f => f.dir === 'loopback');
+  const seen = new Map();
+  // Whole chains, lane by lane. Edges alone are not enough to answer
+  // "where does THIS process go": walking them forward from a shared NIC
+  // reaches every destination anything on the box touched. Measured on
+  // this host, clicking one claude session lit 16 destinations when it
+  // had touched 3 — including two Tor guard relays only `tor` talks to.
+  // Following stored chains cannot invent a hop that no flow produced.
+  const paths = [];
+  const add = (kind, ...chain) => {
+    chain.kind = kind;
+    paths.push(chain);
+    for (let i = 1; i < chain.length; i++){
+      const key = chain[i-1] + '\u0000' + chain[i];
+      const e = seen.get(key);
+      if (e) { e.n++; } else { seen.set(key, {a: chain[i-1], b: chain[i], kind: chain.kind, n: 1}); }
+    }
+  };
+
+  // Who owns each local hop port, so "Tor SOCKS" can say whose it is.
+  // The server side of a loopback connection is the listener, so read the
+  // actor off a flow whose LOCAL port is the hop port.
+  const hopOwner = {};
+  for (const f of flows){
+    if (HOPS[f.lport] && f.actor !== 'unattributed') hopOwner[f.lport] = f.actor;
+  }
+
+  const sw = new Map();
+  const bump = (f) => {
+    if (!sw.has(f.actor)) sw.set(f.actor, {kind:f.kind, out:0, hop:0, pid:f.pid});
+    return sw.get(f.actor);
+  };
+  for (const f of out)  bump(f).out++;
+  for (const f of loop) if (HOPS[f.rport]) bump(f).hop++;
+
+  const hops = new Map(), nics = new Map(), dest = new Map();
+  for (const f of out){
+    nics.set(f.local, (nics.get(f.local)||0)+1);
+    dest.set(f.remote, (dest.get(f.remote)||0)+1);
+    add(f.kind, 'dev:host', 'sw:'+f.actor, 'nic:'+f.local, 'dst:'+f.remote);
+  }
+  const usesHop = new Set();
+  for (const f of loop){
+    const label = HOPS[f.rport];
+    if (!label) continue;
+    if (!hops.has(label)) hops.set(label, {n:0, port:f.rport});
+    hops.get(label).n++;
+    add(f.kind, 'dev:host', 'sw:'+f.actor, 'hop:'+label);
+    usesHop.add(f.actor + '\u0000' + label + '\u0000' + f.rport + '\u0000' + f.kind);
+  }
+  // An app that reaches a local hop continues out through the process
+  // that OWNS the hop — its traffic really does leave via tor's sockets,
+  // and drawing the break would hide the one link the tool exists to
+  // show. One chain per (app, hop, egress) rather than per flow pair,
+  // which would multiply out to thousands.
+  for (const use of usesHop){
+    const [actor, label, port, kind] = use.split('\u0000');
+    const owner = hopOwner[port];
+    if (!owner || owner === actor) continue;
+    const egress = new Set();
+    for (const f of out){
+      if (f.actor !== owner) continue;
+      const key = f.local + '\u0000' + f.remote;
+      if (egress.has(key)) continue;
+      egress.add(key);
+      add(kind, 'dev:host', 'sw:'+actor, 'hop:'+label, 'nic:'+f.local, 'dst:'+f.remote);
+    }
+  }
+  // Software with neither — listed so it is not silently missing.
+  for (const [name, v] of sw){
+    if (!paths.some(p => p[1] === 'sw:'+name)) add(v.kind, 'dev:host', 'sw:'+name);
+  }
+
+  graph = { edges: [...seen.values()], paths, sw, hops, nics, dest, hopOwner };
+  return graph;
+}
+
+// The chains that pass through `id`: which nodes stay lit, and which
+// links between them are actually on one of those chains.
+//
+// Reading the chains rather than walking edges is what stops the view
+// inventing hops. A forward walk from a shared NIC reaches every
+// destination on the machine; a chain only ever contains hops that one
+// real flow produced.
+function follow(id){
+  const nodes = new Set(), links = new Set();
+  for (const p of graph.paths){
+    if (!p.includes(id)) continue;
+    for (let i = 0; i < p.length; i++){
+      nodes.add(p[i]);
+      if (i) links.add(p[i-1] + '\u0000' + p[i]);
+    }
+  }
+  return { nodes, links };
+}
+
+function render(data){
+  const flows = data.flows || [];
+  // `leaves` is outbound-only: connections THIS machine opened to an
+  // address off the box. Inbound is kept separate rather than merged — a
+  // stranger hitting :443 is not somewhere we chose to connect.
+  const leaving   = flows.filter(f => f.dir === 'outbound');
+  const inbound   = flows.filter(f => f.dir === 'inbound');
+  const loopback  = flows.filter(f => f.dir === 'loopback');
+  const listening = flows.filter(f => f.listening);
+  const g = build(flows);
+
+  const kinds = {};
+  for (const f of leaving) kinds[f.kind] = (kinds[f.kind]||0)+1;
+  const c = $('counts'); c.replaceChildren();
+  for (const k of ['app','service','container','process','unowned']){
+    if (!kinds[k]) continue;
+    const s = el('span');
+    s.appendChild(el('span','dot '+k));
+    s.appendChild(el('b',null,String(kinds[k])));
+    s.appendChild(document.createTextNode(' '+k));
+    c.appendChild(s);
+  }
+  $('host').textContent = flows.length + ' sockets';
+
+  const dd = $('dirs'); dd.replaceChildren();
+  [['out','outbound',leaving.length,'opened by this machine'],
+   ['in','inbound',inbound.length,'opened by someone else, onto a port we listen on'],
+   ['lo','loopback',loopback.length,'never left the box'],
+   ['li','listening',listening.length,'ports accepting connections']].forEach(([cl,label,n,why])=>{
+    const s = el('span', cl);
+    s.appendChild(el('b',null,String(n)));
+    s.appendChild(document.createTextNode(' '+label));
+    s.title = why;
+    dd.appendChild(s);
+  });
+
+  $('l-device').replaceChildren(node('dev:host','hop','This device','localhost'));
+
+  const sw = $('l-software'); sw.replaceChildren();
+  if (!g.sw.size) sw.appendChild(el('div','empty','nothing leaving right now'));
+  const swAll = [...g.sw.entries()].sort((a,b)=>(b[1].out+b[1].hop)-(a[1].out+a[1].hop));
+  swAll.slice(0,LANE_CAP).forEach(([name,v])=>{
+    const bits = [];
+    if (v.out) bits.push(plural(v.out,'connection'));
+    if (v.hop) bits.push(plural(v.hop,'local hop'));
+    if (v.pid) bits.push('pid '+v.pid);
+    sw.appendChild(node('sw:'+name, v.kind, name, bits.join(' · ')));
+  });
+  overflow(sw, swAll.length - LANE_CAP);
+
+  const pl = $('l-proxy'); pl.replaceChildren();
+  if (!g.hops.size) pl.appendChild(el('div','empty','none detected'));
+  [...g.hops.entries()].sort((a,b)=>b[1].n-a[1].n).forEach(([name,o])=>{
+    const owner = g.hopOwner[o.port];
+    pl.appendChild(node('hop:'+name,'hop', name,
+      plural(o.n,'connection') + (owner ? ' · ' + owner : '')));
+  });
+
+  const nl = $('l-nic'); nl.replaceChildren();
+  if (!g.nics.size) nl.appendChild(el('div','empty','—'));
+  [...g.nics.entries()].sort((a,b)=>b[1]-a[1]).forEach(([ip,n])=>
+    nl.appendChild(node('nic:'+ip,'hop', ip, plural(n,'flow'))));
+
+  const dl = $('l-dest'); dl.replaceChildren();
+  if (!g.dest.size) dl.appendChild(el('div','empty','—'));
+  const dAll = [...g.dest.entries()].sort((a,b)=>b[1]-a[1]);
+  dAll.slice(0,LANE_CAP).forEach(([ip,n])=>
+    dl.appendChild(node('dst:'+ip,'hop', ip, plural(n,'flow'))));
+  overflow(dl, dAll.length - LANE_CAP);
+
+  const rows = $('rows'); rows.replaceChildren();
+  leaving.slice().sort((a,b)=>a.actor.localeCompare(b.actor)).slice(0,200).forEach(f=>{
+    const tr = el('tr');
+    const a = el('td', null, f.actor); a.title = f.exe || f.actor;
+    tr.appendChild(a);
+    const r = el('td', null, f.remote+':'+f.rport); r.title = r.textContent;
+    tr.appendChild(r);
+    tr.appendChild(el('td','muted',f.proto));
+    tr.appendChild(el('td','muted',f.state));
+    rows.appendChild(tr);
+  });
+  if (!leaving.length){
+    const tr = el('tr'); const td = el('td','muted','nothing leaving this machine');
+    td.colSpan = 4; tr.appendChild(td); rows.appendChild(tr);
+  }
+
+  const irows = $('inrows'); irows.replaceChildren();
+  inbound.slice().sort((a,b)=>a.lport-b.lport).slice(0,200).forEach(f=>{
+    const tr = el('tr');
+    tr.appendChild(el('td',null,String(f.lport)));
+    const r = el('td', null, f.remote); r.title = f.remote;
+    tr.appendChild(r);
+    const a = el('td','muted',f.actor); a.title = f.exe || f.actor;
+    tr.appendChild(a);
+    tr.appendChild(el('td','muted',f.state));
+    irows.appendChild(tr);
+  });
+  if (!inbound.length){
+    const tr = el('tr'); const td = el('td','muted','nothing reaching in');
+    td.colSpan = 4; tr.appendChild(td); irows.appendChild(tr);
+  }
+
+  paint();
+}
+
+// ---- wires -----------------------------------------------------------
+function paint(){
+  const lanes = $('lanes');
+  const nodes = new Map();
+  for (const d of lanes.querySelectorAll('.node')) nodes.set(d.dataset.id, d);
+
+  // A selection whose node is gone — the process exited between polls —
+  // is cleared rather than left highlighting nothing.
+  if (selected && !nodes.has(selected)) selected = null;
+  const path = selected ? follow(selected) : null;
+
+  for (const [id, d] of nodes){
+    d.classList.toggle('sel', id === selected);
+    d.classList.toggle('dim', !!path && !path.nodes.has(id));
+  }
+  $('hint').textContent = selected
+    ? 'Following ' + selected.slice(selected.indexOf(':') + 1) + ' — click it again to clear.'
+    : 'Click any node to follow one path. Click it again to clear.';
+
+  const svg = $('wires');
+  const box = lanes.getBoundingClientRect();
+  const w = lanes.scrollWidth, h = lanes.scrollHeight;
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('width', w);
+  svg.setAttribute('height', h);
+  svg.replaceChildren();
+
+  for (const e of graph.edges){
+    const na = nodes.get(e.a), nb = nodes.get(e.b);
+    if (!na || !nb) continue;               // trimmed away by a top-N slice
+    const ra = na.getBoundingClientRect(), rb = nb.getBoundingClientRect();
+    const x1 = ra.right - box.left, y1 = ra.top - box.top + ra.height/2;
+    const x2 = rb.left  - box.left, y2 = rb.top - box.top + rb.height/2;
+    const dx = Math.max(24, (x2 - x1) * 0.5);
+    const p = document.createElementNS(SVGNS, 'path');
+    p.setAttribute('d', `M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}`);
+    p.setAttribute('fill', 'none');
+    const on = !path || path.links.has(e.a + '\u0000' + e.b);
+    // Log, not linear: one link here carries 96 connections and another
+    // carries 1. Scaled linearly the quiet one would be invisible.
+    const weight = Math.min(5, 1 + Math.log2(e.n));
+    p.setAttribute('stroke', on ? `var(--${e.kind})` : 'var(--wire)');
+    p.setAttribute('stroke-width', on ? weight : Math.min(weight, 0.8));
+    p.setAttribute('opacity', on ? (path ? 0.95 : 0.45) : 0.1);
+    const label = e.a.slice(e.a.indexOf(':')+1) + ' \u2192 ' + e.b.slice(e.b.indexOf(':')+1);
+    p.appendChild(document.createElementNS(SVGNS,'title'))
+     .textContent = label + ' \u00b7 ' + plural(e.n, 'connection');
+    svg.appendChild(p);
+  }
+}
+
+async function tick(){
+  try{
+    const r = await fetch('/api/snapshot', {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    render(await r.json());
+    $('foot').textContent = 'observe-only — nothing here changes a route · updated '
+      + new Date().toLocaleTimeString();
+    $('foot').classList.remove('err');
+  }catch(e){
+    $('foot').textContent = 'snapshot failed: ' + e.message;
+    $('foot').classList.add('err');
+  }
+}
+tick();
+setInterval(tick, 3000);
+addEventListener('resize', paint);
+</script>
+</body>
+</html>

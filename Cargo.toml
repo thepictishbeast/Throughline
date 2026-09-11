@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = ["crates/tl-inventory", "crates/tl-serve"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thepictishbeast/Throughline"
+publish = false
