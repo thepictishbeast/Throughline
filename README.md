@@ -438,3 +438,9 @@ to the real one.
 * a leak-audit module: VPN bound only to the expected ports, no plaintext
   DNS on the physical adapter, egress address ≠ home address, Tor
   confirmed
+
+## Licence
+
+MIT or Apache-2.0, at your option — `LICENSE-MIT` and `LICENSE-APACHE`.
+The dual form is the Rust ecosystem's convention and lets this be used
+alongside anything else in that ecosystem.
