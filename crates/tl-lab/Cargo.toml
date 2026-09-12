@@ -1,0 +1,41 @@
+[package]
+name = "tl-lab"
+version = "0.1.0"
+description = "A network-lab canvas for one real Linux host: draw the topology, run it for real in namespaces, then apply it."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The first dependencies in this workspace, and only here.
+#
+# tl-inventory and tl-policy stay dependency-free on purpose: they read
+# every process on the machine and generate firewall rules, and a reader
+# should be able to audit them without first auditing a tree of other
+# people's code. A drawing canvas is a different kind of thing, and
+# writing one from scratch would be worse code than egui by a wide margin.
+[dependencies]
+tl-inventory = { path = "../tl-inventory" }
+tl-policy = { path = "../tl-policy" }
+egui = "0.32"
+# x11 AND wayland: a Linux desktop is one or the other and the binary
+# should not care which. wgpu rather than glow so the same renderer can
+# draw offscreen on a machine with no display, which is how this UI gets
+# looked at at all.
+#
+# NO accesskit. On Linux it is the AT-SPI bridge, which drags in zbus,
+# atspi and zbus_xml -- and zbus_xml pins quick-xml ^0.38, which carries
+# two unfixable high-severity advisories (RUSTSEC-2026-0194/0195). Forty
+# crates and a D-Bus client inside a tool that reads every process on the
+# machine is the wrong trade for an accessibility bridge that only does
+# anything when a screen reader is running. Revisit when zbus_xml moves.
+eframe = { version = "0.32", default-features = false, features = [
+    "wgpu", "default_fonts", "x11", "wayland",
+] }
+
+# No egui_kittest: it turns egui's accesskit feature on, cargo unifies
+# features across the whole build, and the D-Bus stack above comes back.
+# The offscreen renderer this crate needs for screenshots is built on
+# egui-wgpu, which eframe already brings.
+[dev-dependencies]

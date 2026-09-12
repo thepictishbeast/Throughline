@@ -1,0 +1,74 @@
+# What this project will accept from other people's code.
+#
+# Written out rather than left to a default, because the default is "allow
+# nothing" and a blanket failure teaches nobody anything. The two crates
+# that read your machine and generate firewall rules — tl-inventory and
+# tl-policy — have no dependencies at all and this file does not apply to
+# them in any meaningful way. It exists for tl-lab, which draws a canvas,
+# and a drawing canvas is not worth writing from scratch.
+
+# Only the platforms this is actually built for.
+#
+# Without this, cargo-deny judges crates that exist solely for targets
+# nobody here compiles — the UEFI and wasm ones especially — and reports
+# licence problems in code that is never linked. Judging what is built is
+# the honest check; judging what is not is noise that trains people to
+# ignore the tool.
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+
+[licenses]
+# Permissive licences only. Everything here can be shipped in a binary
+# under this project's own MIT/Apache-2.0 terms without imposing further
+# conditions on whoever uses it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # Fonts, not code: egui embeds a default typeface so that text renders
+    # on a machine with no fonts installed. Both are open font licences
+    # and neither reaches the rest of the binary.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.9
+
+[advisories]
+# A vulnerability fails the build. No exceptions list, on purpose: an
+# exception here is a decision that outlives whoever made it, and this
+# project has had none.
+yanked = "deny"
+# Flag an unmaintained crate only where somebody here chose it. Every
+# unmaintained crate deep in a dependency tree fails a build that nobody
+# can fix -- ttf-parser is how egui parses fonts, and there is no other
+# version to move to -- and a check that can never be green is a check
+# people learn to ignore. An unmaintained DIRECT dependency is a decision
+# and still fails.
+unmaintained = "workspace"
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# The crates in this workspace depend on each other by path and have no
+# version to state, which reads as a wildcard. A wildcard on somebody
+# else's crate is still refused.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
