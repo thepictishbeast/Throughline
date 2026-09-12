@@ -14,3 +14,4 @@ pub mod proc_net;
 pub mod procs;
 pub mod services;
 pub mod snapshot;
+pub mod visibility;
