@@ -215,3 +215,65 @@ Measured, not assumed:
 Every row is something a person would want on the canvas, and none of it
 is detected today. This is the concrete content of "it does not detect
 any networks".
+
+---
+
+# Decisions taken
+
+## Simulation engine: CORE, over gRPC
+
+[CORE](https://github.com/coreemu/core) (Common Open Research Emulator),
+BSD-2-Clause, actively maintained, Python + C.
+
+It already does the entire "actually simulate" half of the brief:
+topologies built from Linux network namespaces, link impairment
+(bandwidth, delay, loss, jitter), real applications running inside nodes,
+and an **RJ45 node that bridges the emulated topology to a real host
+interface**. Its own GUI drives all of it through a gRPC API, which means
+any front end can.
+
+What stays ours: reading the real host, detecting its networks, grading a
+topology, and applying it. CORE does none of that and is not trying to.
+
+**The cost, stated:** Throughline stops being one static binary. It gains
+a Python daemon that must be installed and running.
+
+## Front end: our own canvas
+
+Rust + egui, borrowing the conventions that GNS3 has already proven —
+a named-port picker for links rather than drag-from-handle, per-link-END
+status shown in **colour and shape** (green round up, red square down, so
+it survives colourblindness), marquee select, Ship/middle-drag pan,
+Ctrl+wheel zoom, Delete to delete, explicit align rather than grid snap.
+
+Not CORE's tkinter GUI, which has the right interaction model and the
+wrong decade, and is built around imaginary labs rather than a real host.
+
+Everything below the front end stays UI-free, so a TUI for servers can
+sit on the same core later.
+
+## ⚠ CORE must not be installed on this host as-is
+
+From CORE's own install documentation:
+
+> If Docker is installed, the default iptable rules will block CORE
+> traffic — `sudo iptables --policy FORWARD ACCEPT`
+
+This machine runs ~50 containers behind an nftables baseline whose
+FORWARD chain is **default DROP with explicit per-container accepts**,
+and it has already lost docker's chains silently for 32 days once.
+Setting FORWARD to ACCEPT on a production mail and web server to run an
+emulator is not an acceptable trade.
+
+CORE also installs a **root systemd daemon** and manipulates host
+networking.
+
+So:
+
+* Develop against CORE's `.proto` definitions, which need no
+  installation.
+* Run `core-daemon` in a **container or a VM**, never on the host, and
+  never on this one.
+* The shipped tool must **detect** whether a daemon is reachable and say
+  so plainly rather than failing obscurely — and must never instruct a
+  user to open their FORWARD policy.
