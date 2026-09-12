@@ -44,7 +44,9 @@ impl Gate {
     #[cfg(test)]
     #[must_use]
     pub fn with_token(token: &str) -> Self {
-        Self { token: token.to_owned() }
+        Self {
+            token: token.to_owned(),
+        }
     }
 
     /// The token, for printing once at startup.

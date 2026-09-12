@@ -14,14 +14,22 @@ fn main() {
         // the failure mode; count it rather than trusting it.
         let data_lines = text
             .lines()
-            .filter(|l| l.split_whitespace().next().is_some_and(|f| f.ends_with(':')))
+            .filter(|l| {
+                l.split_whitespace()
+                    .next()
+                    .is_some_and(|f| f.ends_with(':'))
+            })
             .count();
         println!(
             "{:>5}: {:>4} data lines -> {:>4} parsed{}",
             p.label(),
             data_lines,
             rows.len(),
-            if data_lines == rows.len() { "" } else { "   *** DROPPED ROWS" }
+            if data_lines == rows.len() {
+                ""
+            } else {
+                "   *** DROPPED ROWS"
+            }
         );
         total += rows.len();
         for s in rows.iter().filter(|s| s.has_peer()).take(3) {

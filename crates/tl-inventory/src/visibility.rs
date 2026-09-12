@@ -273,7 +273,11 @@ Inter-|   Receive                                                |  Transmit
         fs::write(d.join("version"), "Linux version 5.10.0-android13-4\n").unwrap();
         let v = assess(&d, 0, 0);
         assert!(v.android);
-        assert!(v.remedy.as_ref().unwrap().contains("Android"), "{:?}", v.remedy);
+        assert!(
+            v.remedy.as_ref().unwrap().contains("Android"),
+            "{:?}",
+            v.remedy
+        );
         assert!(!v.remedy.as_ref().unwrap().contains("run it as root"));
         let _ = fs::remove_dir_all(&d);
     }

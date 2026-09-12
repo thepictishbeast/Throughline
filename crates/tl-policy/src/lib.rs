@@ -26,8 +26,8 @@ pub mod apply;
 pub mod probe;
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 use std::fmt::Write as _;
+use std::net::IpAddr;
 
 /// Where an application's traffic should go.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -205,7 +205,10 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { rules: Vec::new(), default_path: Path::Direct }
+        Self {
+            rules: Vec::new(),
+            default_path: Path::Direct,
+        }
     }
 }
 
@@ -227,6 +230,9 @@ pub enum Refusal {
     DuplicateSelector { selector: String },
     /// An address to protect is not an address.
     UnparseablePeer { peer: String },
+    /// A tunnel is being routed into, and nobody said where its own
+    /// packets go.
+    TunnelEndpointUnknown { interface: String },
     /// A rule names a cgroup that does not exist on this host.
     NoSuchCgroup { path: String },
     /// Traffic would be routed out an interface whose reverse-path filter
@@ -276,6 +282,14 @@ impl Refusal {
                 "{peer:?} is not an IP address, so no rule can match it and the session \
                  it names would not be excluded. A hostname will not do: nftables \
                  matches addresses."
+            ),
+            Self::TunnelEndpointUnknown { interface } => format!(
+                "traffic is being routed into {interface} and no endpoint was given for \
+                 it. A tunnel's own packets must reach its server OUTSIDE the tunnel; \
+                 route them into it and the tunnel can never be built. Pass the peer \
+                 address with --endpoint. This is refused rather than assumed because \
+                 an exclusion that is silently absent looks exactly like one that is \
+                 present and working."
             ),
             Self::NoSuchCgroup { path } => format!(
                 "no cgroup {path} on this host, so nftables will reject the ruleset -- \
@@ -346,9 +360,7 @@ impl Policy {
         }
         // Marks only mean anything for paths that move traffic to another
         // route. Direct is the absence of a mark.
-        for (mark, p) in
-            (MARK_BASE..).zip(paths.iter().filter(|p| p.interface().is_some()))
-        {
+        for (mark, p) in (MARK_BASE..).zip(paths.iter().filter(|p| p.interface().is_some())) {
             plan.marks.insert(p.label(), mark);
         }
 
@@ -366,7 +378,8 @@ impl Policy {
                 "ip rule add fwmark {mark:#x} lookup {table} priority {}",
                 1000 + (mark - MARK_BASE)
             ));
-            plan.ip.push(format!("ip route add default dev {iface} table {table}"));
+            plan.ip
+                .push(format!("ip route add default dev {iface} table {table}"));
             // Built alongside, so the undo cannot drift from the do.
             plan.revert.push(format!("ip route flush table {table}"));
             plan.revert.push(format!(
@@ -374,7 +387,8 @@ impl Policy {
                 1000 + (mark - MARK_BASE)
             ));
         }
-        plan.revert.insert(0, format!("nft delete table inet {TABLE}"));
+        plan.revert
+            .insert(0, format!("nft delete table inet {TABLE}"));
 
         if uses_tor {
             let trans = host.tor_trans_port.unwrap_or(9040);
@@ -382,7 +396,8 @@ impl Policy {
             plan.torrc.push(format!("TransPort 127.0.0.1:{trans}"));
             plan.torrc.push(format!("DNSPort 127.0.0.1:{dns}"));
             plan.torrc.push("AutomapHostsOnResolve 1".to_owned());
-            plan.torrc.push("AutomapHostsSuffixes .onion,.exit".to_owned());
+            plan.torrc
+                .push("AutomapHostsSuffixes .onion,.exit".to_owned());
             plan.notes.push(
                 "DNS is redirected to Tor's DNSPort as well as TCP. Routing TCP alone \
                  leaves every hostname the application looks up in plaintext, which \
@@ -425,7 +440,10 @@ impl Policy {
             let trans = host.tor_trans_port.unwrap_or(9040);
             let dns = host.tor_dns_port.unwrap_or(9053);
             let _ = writeln!(s, "  chain {NAT_CHAIN} {{");
-            let _ = writeln!(s, "    type nat hook output priority dstnat; policy accept;");
+            let _ = writeln!(
+                s,
+                "    type nat hook output priority dstnat; policy accept;"
+            );
             let _ = writeln!(s, "{}", Self::exclusions(host, "    "));
             if let Some(uid) = host.tor_uid {
                 let _ = writeln!(s, "    # Tor's own packets, or they never reach a relay.");
@@ -451,15 +469,14 @@ impl Policy {
         }
 
         let _ = writeln!(s, "  chain {MARK_CHAIN} {{");
-        let _ = writeln!(s, "    type route hook output priority mangle; policy accept;");
+        let _ = writeln!(
+            s,
+            "    type route hook output priority mangle; policy accept;"
+        );
         let _ = writeln!(s, "{}", Self::exclusions(host, "    "));
         for r in &self.rules {
             if let Some(mark) = marks.get(&r.path.label()) {
-                let _ = writeln!(
-                    s,
-                    "    {} meta mark set {mark:#x}",
-                    r.selector.nft_match()
-                );
+                let _ = writeln!(s, "    {} meta mark set {mark:#x}", r.selector.nft_match());
             }
         }
         // Tor-via-VPN: it is Tor's OWN socket that must take the tunnel.
@@ -469,14 +486,22 @@ impl Policy {
         if let Path::TorViaVpn { interface } = &self.default_path
             && let (Some(uid), Some(mark)) = (
                 host.tor_uid,
-                marks.get(&Path::TorViaVpn { interface: interface.clone() }.label()),
+                marks.get(
+                    &Path::TorViaVpn {
+                        interface: interface.clone(),
+                    }
+                    .label(),
+                ),
             )
         {
             let _ = writeln!(s, "    # Tor itself takes the tunnel; apps take Tor.");
             let _ = writeln!(s, "    meta skuid {uid} meta mark set {mark:#x}");
         }
         if let Some(mark) = marks.get(&self.default_path.label()) {
-            let _ = writeln!(s, "    meta mark set {mark:#x}   # default for everything else");
+            let _ = writeln!(
+                s,
+                "    meta mark set {mark:#x}   # default for everything else"
+            );
         }
         if !marks.is_empty() {
             // Save the decision onto the connection.
@@ -491,7 +516,10 @@ impl Policy {
             // Found by sending real traffic through a generated ruleset in
             // a namespace: the SYN went through the tunnel, everything
             // after it went direct.
-            let _ = writeln!(s, "    # Remember it, so the rest of the connection follows.");
+            let _ = writeln!(
+                s,
+                "    # Remember it, so the rest of the connection follows."
+            );
             let _ = writeln!(s, "    meta mark != 0x0 ct mark set meta mark");
         }
         let _ = writeln!(s, "  }}");
@@ -519,7 +547,10 @@ impl Policy {
             .collect();
         if !egress.is_empty() {
             let _ = writeln!(s, "  chain {MASQ_CHAIN} {{");
-            let _ = writeln!(s, "    type nat hook postrouting priority srcnat; policy accept;");
+            let _ = writeln!(
+                s,
+                "    type nat hook postrouting priority srcnat; policy accept;"
+            );
             for iface in egress {
                 let _ = writeln!(s, "    oifname \"{iface}\" masquerade");
             }
@@ -557,7 +588,11 @@ impl Policy {
             );
         }
         for ep in &host.tunnel_endpoints {
-            let _ = writeln!(s, "{indent}{} return   # a tunnel's own endpoint", daddr(ep));
+            let _ = writeln!(
+                s,
+                "{indent}{} return   # a tunnel's own endpoint",
+                daddr(ep)
+            );
         }
         s.trim_end().to_owned()
     }
@@ -574,9 +609,13 @@ impl Plan {
         for r in &policy.rules {
             let label = r.selector.label();
             if label.trim().is_empty() {
-                out.push(Refusal::EmptySelector { selector: label.clone() });
+                out.push(Refusal::EmptySelector {
+                    selector: label.clone(),
+                });
             } else if seen.contains(&label) {
-                out.push(Refusal::DuplicateSelector { selector: label.clone() });
+                out.push(Refusal::DuplicateSelector {
+                    selector: label.clone(),
+                });
             } else {
                 seen.push(label);
             }
@@ -613,7 +652,9 @@ impl Plan {
         }
         if paths.iter().any(|p| p.uses_tor()) {
             if host.tor_trans_port.is_none() {
-                out.push(Refusal::TorNotTransparent { missing: "TransPort" });
+                out.push(Refusal::TorNotTransparent {
+                    missing: "TransPort",
+                });
             }
             if host.tor_dns_port.is_none() {
                 out.push(Refusal::TorNotTransparent { missing: "DNSPort" });
@@ -635,11 +676,39 @@ impl Plan {
                 let get = |n: &str| host.rp_filter.iter().find(|(k, _)| k == n).map(|(_, v)| *v);
                 let strict = get("all").unwrap_or(0).max(get(i).unwrap_or(0)) == 1;
                 if strict
-                    && !out.iter().any(|r| {
-                        matches!(r, Refusal::StrictReversePath { interface } if interface == i)
-                    })
+                    && !out.iter().any(
+                        |r| matches!(r, Refusal::StrictReversePath { interface } if interface == i),
+                    )
                 {
-                    out.push(Refusal::StrictReversePath { interface: i.to_owned() });
+                    out.push(Refusal::StrictReversePath {
+                        interface: i.to_owned(),
+                    });
+                }
+            }
+        }
+
+        // A tunnel with no endpoint declared.
+        //
+        // The exclusion that keeps a tunnel's own packets outside itself
+        // is driven entirely by `Host::tunnel_endpoints`, and nothing
+        // populates that from a real machine -- `probe::host` hard-codes
+        // it empty. So on the live path the protection did not exist,
+        // while a unit test built its own Host by hand and passed. The
+        // gap was invisible from both ends.
+        //
+        // Refusing is the only honest answer available until detection
+        // can find the peer: an exclusion that is silently absent looks
+        // exactly like one that is present and working.
+        for p in &paths {
+            if let Some(i) = p.interface() {
+                if host.tunnel_endpoints.is_empty()
+                    && !out
+                        .iter()
+                        .any(|r| matches!(r, Refusal::TunnelEndpointUnknown { .. }))
+                {
+                    out.push(Refusal::TunnelEndpointUnknown {
+                        interface: i.to_owned(),
+                    });
                 }
             }
         }
@@ -722,7 +791,11 @@ mod tests {
         assert!(plan.nft.contains("ip daddr 198.51.100.7 return"));
         let admin = plan.nft.find("198.51.100.7").unwrap();
         let first_rule = plan.nft.find("redirect to :9040").unwrap();
-        assert!(admin < first_rule, "exclusion must precede the redirect:\n{}", plan.nft);
+        assert!(
+            admin < first_rule,
+            "exclusion must precede the redirect:\n{}",
+            plan.nft
+        );
         assert!(plan.preflight(&p, &host()).is_empty());
     }
 
@@ -730,16 +803,24 @@ mod tests {
     fn a_plan_that_would_strand_the_admin_is_refused() {
         // Same policy, but compiled without knowing about the session.
         // Applying it to a host that does have one must be refused.
-        let blind = Host { admin_peers: vec![], ..host() };
+        let blind = Host {
+            admin_peers: vec![],
+            ..host()
+        };
         let p = Policy {
-            rules: vec![Rule { selector: Selector::Unit("nginx.service".into()), path: Path::Tor }],
+            rules: vec![Rule {
+                selector: Selector::Unit("nginx.service".into()),
+                path: Path::Tor,
+            }],
             default_path: Path::Direct,
         };
         let plan = p.compile(&blind);
         let refusals = plan.preflight(&p, &host());
         assert_eq!(
             refusals,
-            vec![Refusal::WouldStrandAdmin { peer: "198.51.100.7".into() }]
+            vec![Refusal::WouldStrandAdmin {
+                peer: "198.51.100.7".into()
+            }]
         );
         assert!(refusals[0].explain().contains("no second one"));
     }
@@ -749,7 +830,10 @@ mod tests {
         // Without this, every packet Tor sends to a relay is sent back to
         // Tor. Nothing reaches the network and the cause is invisible.
         let p = Policy {
-            rules: vec![Rule { selector: Selector::User(1000), path: Path::Tor }],
+            rules: vec![Rule {
+                selector: Selector::User(1000),
+                path: Path::Tor,
+            }],
             default_path: Path::Direct,
         };
         let plan = p.compile(&host());
@@ -766,11 +850,18 @@ mod tests {
         // anonymous and the browsing is not, which is worse than either
         // honest alternative because it looks like it worked.
         let p = Policy {
-            rules: vec![Rule { selector: Selector::User(1000), path: Path::Tor }],
+            rules: vec![Rule {
+                selector: Selector::User(1000),
+                path: Path::Tor,
+            }],
             default_path: Path::Direct,
         };
         let plan = p.compile(&host());
-        assert!(plan.nft.contains("udp dport 53 redirect to :9053"), "{}", plan.nft);
+        assert!(
+            plan.nft.contains("udp dport 53 redirect to :9053"),
+            "{}",
+            plan.nft
+        );
         assert!(plan.torrc.iter().any(|l| l.starts_with("DNSPort")));
         assert!(plan.notes.iter().any(|n| n.contains("plaintext")));
     }
@@ -783,7 +874,9 @@ mod tests {
         // same name.
         let p = Policy {
             rules: vec![],
-            default_path: Path::TorViaVpn { interface: "wg0".into() },
+            default_path: Path::TorViaVpn {
+                interface: "wg0".into(),
+            },
         };
         let plan = p.compile(&host());
         assert!(
@@ -792,21 +885,39 @@ mod tests {
             plan.nft
         );
         assert!(plan.ip.iter().any(|c| c.contains("dev wg0")));
-        assert!(plan.notes.iter().any(|n| n.contains("guard sees the tunnel")));
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n.contains("guard sees the tunnel"))
+        );
     }
 
     #[test]
     fn a_tunnels_own_endpoint_stays_outside_the_tunnel() {
         // Route a VPN client's packets into the VPN and it can never
         // reach its server to build the tunnel in the first place.
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let plan = p.compile(&host());
-        assert!(plan.nft.contains("ip daddr 203.0.113.9 return"), "{}", plan.nft);
+        assert!(
+            plan.nft.contains("ip daddr 203.0.113.9 return"),
+            "{}",
+            plan.nft
+        );
     }
 
     #[test]
     fn a_missing_interface_is_refused_rather_than_emitted() {
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "tun9".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "tun9".into(),
+            },
+        };
         let plan = p.compile(&host());
         let r = plan.preflight(&p, &host());
         assert!(r.contains(&Refusal::NoSuchInterface {
@@ -818,11 +929,20 @@ mod tests {
 
     #[test]
     fn tor_without_a_transparent_port_is_refused_with_the_lines_to_add() {
-        let bare = Host { tor_trans_port: None, tor_dns_port: None, ..host() };
-        let p = Policy { rules: vec![], default_path: Path::Tor };
+        let bare = Host {
+            tor_trans_port: None,
+            tor_dns_port: None,
+            ..host()
+        };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Tor,
+        };
         let plan = p.compile(&bare);
         let r = plan.preflight(&p, &bare);
-        assert!(r.contains(&Refusal::TorNotTransparent { missing: "TransPort" }));
+        assert!(r.contains(&Refusal::TorNotTransparent {
+            missing: "TransPort"
+        }));
         assert!(r.contains(&Refusal::TorNotTransparent { missing: "DNSPort" }));
         // The plan still says what torrc needs, so the refusal is fixable.
         assert!(plan.torrc.iter().any(|l| l.contains("TransPort")));
@@ -843,9 +963,12 @@ mod tests {
             default_path: Path::Direct,
         };
         let plan = p.compile(&host());
-        assert!(plan.preflight(&p, &host()).contains(&Refusal::NoSuchCgroup {
-            path: "system.slice/firefox.service".into()
-        }));
+        assert!(
+            plan.preflight(&p, &host())
+                .contains(&Refusal::NoSuchCgroup {
+                    path: "system.slice/firefox.service".into()
+                })
+        );
         // One that IS running passes.
         let ok = Policy {
             rules: vec![Rule {
@@ -880,14 +1003,22 @@ mod tests {
     fn two_rules_for_one_sender_are_refused_not_silently_ordered() {
         let p = Policy {
             rules: vec![
-                Rule { selector: Selector::User(1000), path: Path::Tor },
-                Rule { selector: Selector::User(1000), path: Path::Direct },
+                Rule {
+                    selector: Selector::User(1000),
+                    path: Path::Tor,
+                },
+                Rule {
+                    selector: Selector::User(1000),
+                    path: Path::Direct,
+                },
             ],
             default_path: Path::Direct,
         };
         let plan = p.compile(&host());
         let r = plan.preflight(&p, &host());
-        assert!(r.contains(&Refusal::DuplicateSelector { selector: "uid 1000".into() }));
+        assert!(r.contains(&Refusal::DuplicateSelector {
+            selector: "uid 1000".into()
+        }));
     }
 
     #[test]
@@ -895,7 +1026,12 @@ mod tests {
         // A policy change must not tear down what is already open. That
         // is also what keeps an inbound session alive when the rule is
         // about outbound traffic.
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let plan = p.compile(&host());
         assert!(plan.nft.contains("ct state established,related return"));
     }
@@ -906,19 +1042,42 @@ mod tests {
         // match on a mark, and routing tables with a default route in
         // them. Both survive, both can misroute traffic the next time
         // anything sets that mark, and neither is visible in `nft list`.
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let plan = p.compile(&host());
         assert_eq!(plan.revert[0], format!("nft delete table inet {TABLE}"));
-        assert!(plan.revert.iter().any(|c| c.starts_with("ip rule del fwmark")), "{:?}", plan.revert);
-        assert!(plan.revert.iter().any(|c| c.starts_with("ip route flush table")), "{:?}", plan.revert);
+        assert!(
+            plan.revert
+                .iter()
+                .any(|c| c.starts_with("ip rule del fwmark")),
+            "{:?}",
+            plan.revert
+        );
+        assert!(
+            plan.revert
+                .iter()
+                .any(|c| c.starts_with("ip route flush table")),
+            "{:?}",
+            plan.revert
+        );
         // One undo per thing done.
         assert_eq!(plan.revert.len(), plan.ip.len() + 1, "{:?}", plan.revert);
     }
 
     #[test]
     fn a_policy_that_changes_nothing_has_nothing_to_undo_but_the_table() {
-        let p = Policy { rules: vec![], default_path: Path::Direct };
-        assert_eq!(p.compile(&host()).revert, vec![format!("nft delete table inet {TABLE}")]);
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Direct,
+        };
+        assert_eq!(
+            p.compile(&host()).revert,
+            vec![format!("nft delete table inet {TABLE}")]
+        );
     }
 
     #[test]
@@ -928,15 +1087,32 @@ mod tests {
         // packet out a different interface, still carrying the first
         // one's address. In a test namespace the far end received the
         // connection and answered, and the reply went nowhere.
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let plan = p.compile(&host());
-        assert!(plan.nft.contains("type nat hook postrouting priority srcnat"), "{}", plan.nft);
-        assert!(plan.nft.contains("oifname \"wg0\" masquerade"), "{}", plan.nft);
+        assert!(
+            plan.nft
+                .contains("type nat hook postrouting priority srcnat"),
+            "{}",
+            plan.nft
+        );
+        assert!(
+            plan.nft.contains("oifname \"wg0\" masquerade"),
+            "{}",
+            plan.nft
+        );
     }
 
     #[test]
     fn no_masquerade_chain_when_nothing_is_rerouted() {
-        let p = Policy { rules: vec![], default_path: Path::Direct };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Direct,
+        };
         let plan = p.compile(&host());
         assert!(!plan.nft.contains("masquerade"), "{}", plan.nft);
     }
@@ -950,9 +1126,19 @@ mod tests {
             rp_filter: vec![("all".into(), 1), ("wg0".into(), 1)],
             ..host()
         };
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let r = p.compile(&strict).preflight(&p, &strict);
-        assert!(r.contains(&Refusal::StrictReversePath { interface: "wg0".into() }), "{r:?}");
+        assert!(
+            r.contains(&Refusal::StrictReversePath {
+                interface: "wg0".into()
+            }),
+            "{r:?}"
+        );
         assert!(r[0].explain().contains("rp_filter=2"));
     }
 
@@ -961,11 +1147,21 @@ mod tests {
         // max(all, interface) with 0=off 1=strict 2=loose, so all=2 makes
         // the interface loose whatever its own value says. Refusing here
         // would block a plan that works.
-        let h = Host { rp_filter: vec![("all".into(), 2), ("wg0".into(), 1)], ..host() };
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let h = Host {
+            rp_filter: vec![("all".into(), 2), ("wg0".into(), 1)],
+            ..host()
+        };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         assert!(
-            !p.compile(&h).preflight(&p, &h).iter().any(|r|
-                matches!(r, Refusal::StrictReversePath { .. })),
+            !p.compile(&h)
+                .preflight(&p, &h)
+                .iter()
+                .any(|r| matches!(r, Refusal::StrictReversePath { .. })),
             "refused a plan that the kernel would route fine"
         );
     }
@@ -978,9 +1174,19 @@ mod tests {
             rp_filter: vec![("all".into(), 1), ("wg0".into(), 1)],
             ..host()
         };
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let r = p.compile(&strict).preflight(&p, &strict);
-        assert!(r.contains(&Refusal::StrictReversePath { interface: "wg0".into() }), "{r:?}");
+        assert!(
+            r.contains(&Refusal::StrictReversePath {
+                interface: "wg0".into()
+            }),
+            "{r:?}"
+        );
     }
 
     #[test]
@@ -997,12 +1203,17 @@ mod tests {
                 selector: Selector::Unit("nginx.service".into()),
                 path: Path::Tor,
             }],
-            default_path: Path::Vpn { interface: "wg0".into() },
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
         };
         let nft = p.compile(&host()).nft;
         for line in nft.lines().filter(|l| l.trim_start().starts_with("chain ")) {
             let name = line.split_whitespace().nth(1).unwrap();
-            assert!(name.starts_with("tl_"), "chain {name} is not prefixed: {line}");
+            assert!(
+                name.starts_with("tl_"),
+                "chain {name} is not prefixed: {line}"
+            );
         }
     }
 
@@ -1017,24 +1228,39 @@ mod tests {
         // Measured: with real traffic in a namespace, marking by cgroup
         // alone reached the tunnel; adding the exclusions broke it
         // entirely until the connection mark was carried.
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let nft = p.compile(&host()).nft;
-        let restore = nft.find("ct mark != 0x0 meta mark set ct mark return")
+        let restore = nft
+            .find("ct mark != 0x0 meta mark set ct mark return")
             .expect("connection mark is not restored");
-        let leave_alone = nft.find("ct state established,related return")
+        let leave_alone = nft
+            .find("ct state established,related return")
             .expect("no established rule");
-        let save = nft.find("ct mark set meta mark").expect("decision is never saved");
+        let save = nft
+            .find("ct mark set meta mark")
+            .expect("decision is never saved");
         assert!(
             restore < leave_alone,
             "restoring must come first, or an established packet returns before it is \
              recognised:\n{nft}"
         );
-        assert!(save > leave_alone, "the save must come after the selectors:\n{nft}");
+        assert!(
+            save > leave_alone,
+            "the save must come after the selectors:\n{nft}"
+        );
     }
 
     #[test]
     fn nothing_is_saved_onto_a_connection_when_nothing_is_rerouted() {
-        let p = Policy { rules: vec![], default_path: Path::Direct };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Direct,
+        };
         let nft = p.compile(&host()).nft;
         assert!(!nft.contains("ct mark set meta mark"), "{nft}");
     }
@@ -1049,7 +1275,12 @@ mod tests {
             admin_peers: vec!["2001:db8::7".into(), "198.51.100.7".into()],
             ..host()
         };
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let nft = p.compile(&h).nft;
         assert!(nft.contains("ip6 daddr 2001:db8::7 return"), "{nft}");
         assert!(nft.contains("ip daddr 198.51.100.7 return"), "{nft}");
@@ -1061,8 +1292,16 @@ mod tests {
         // An inbound session on a dual-stack listener is reported as
         // ::ffff:a.b.c.d, but the packets are IPv4 and only `ip daddr`
         // will ever match them.
-        let h = Host { admin_peers: vec!["::ffff:198.51.100.7".into()], ..host() };
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let h = Host {
+            admin_peers: vec!["::ffff:198.51.100.7".into()],
+            ..host()
+        };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let nft = p.compile(&h).nft;
         assert!(nft.contains("ip daddr 198.51.100.7 return"), "{nft}");
         assert!(!nft.contains("ip6 daddr"), "{nft}");
@@ -1070,15 +1309,25 @@ mod tests {
 
     #[test]
     fn an_address_that_is_not_an_address_is_visible_not_silently_dropped() {
-        let h = Host { admin_peers: vec!["my-laptop.local".into()], ..host() };
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let h = Host {
+            admin_peers: vec!["my-laptop.local".into()],
+            ..host()
+        };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let plan = p.compile(&h);
         assert!(plan.nft.contains("unparseable address"), "{}", plan.nft);
         // And the plan is refused, rather than quietly applying with one
         // fewer protection than the operator asked for.
         let r = plan.preflight(&p, &h);
         assert!(
-            r.contains(&Refusal::UnparseablePeer { peer: "my-laptop.local".into() }),
+            r.contains(&Refusal::UnparseablePeer {
+                peer: "my-laptop.local".into()
+            }),
             "must not pass silently: {r:?}"
         );
         assert!(r[0].explain().contains("nftables matches addresses"));
@@ -1086,17 +1335,85 @@ mod tests {
 
     #[test]
     fn re_applying_replaces_the_table_instead_of_stacking_onto_it() {
-        let p = Policy { rules: vec![], default_path: Path::Vpn { interface: "wg0".into() } };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
         let nft = p.compile(&host()).nft;
-        let create = nft.find(&format!("table inet {TABLE}\n")).expect("no bare create");
-        let delete = nft.find(&format!("delete table inet {TABLE}")).expect("no delete");
-        let body = nft.find(&format!("table inet {TABLE} {{")).expect("no body");
+        let create = nft
+            .find(&format!("table inet {TABLE}\n"))
+            .expect("no bare create");
+        let delete = nft
+            .find(&format!("delete table inet {TABLE}"))
+            .expect("no delete");
+        let body = nft
+            .find(&format!("table inet {TABLE} {{"))
+            .expect("no body");
         assert!(create < delete && delete < body, "{nft}");
     }
 
     #[test]
+    fn routing_into_a_tunnel_with_no_endpoint_is_refused_not_assumed() {
+        // The exclusion keeping a tunnel's own packets outside itself is
+        // driven by Host::tunnel_endpoints, and probe::host has always
+        // hard-coded that empty -- so on every real host the protection
+        // silently did not exist, while this file's own tests passed
+        // because they build a Host by hand. An absent exclusion looks
+        // identical to a working one, which is the failure this crate
+        // exists to refuse.
+        let bare = Host {
+            tunnel_endpoints: vec![],
+            ..host()
+        };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Vpn {
+                interface: "wg0".into(),
+            },
+        };
+        let r = p.compile(&bare).preflight(&p, &bare);
+        assert!(
+            r.contains(&Refusal::TunnelEndpointUnknown {
+                interface: "wg0".into()
+            }),
+            "{r:?}"
+        );
+        assert!(r[0].explain().contains("can never be built"));
+        // Declaring it clears the refusal.
+        assert!(
+            !p.compile(&host())
+                .preflight(&p, &host())
+                .iter()
+                .any(|x| matches!(x, Refusal::TunnelEndpointUnknown { .. }))
+        );
+    }
+
+    #[test]
+    fn a_policy_that_tunnels_nothing_needs_no_endpoint() {
+        let bare = Host {
+            tunnel_endpoints: vec![],
+            ..host()
+        };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Direct,
+        };
+        assert!(
+            !p.compile(&bare)
+                .preflight(&p, &bare)
+                .iter()
+                .any(|x| matches!(x, Refusal::TunnelEndpointUnknown { .. }))
+        );
+    }
+
+    #[test]
     fn direct_is_the_absence_of_a_mark_not_a_mark_of_its_own() {
-        let p = Policy { rules: vec![], default_path: Path::Direct };
+        let p = Policy {
+            rules: vec![],
+            default_path: Path::Direct,
+        };
         let plan = p.compile(&host());
         assert!(plan.marks.is_empty(), "{:?}", plan.marks);
         assert!(plan.ip.is_empty(), "nothing to route");

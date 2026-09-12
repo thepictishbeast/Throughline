@@ -323,10 +323,15 @@ echo "-- the host itself was never touched"
 check "host has no throughline table" 0 \
   "$(nft list tables 2>/dev/null | grep -c throughline)"
 check "host has no fwmark rules"      0 "$(ip rule show | grep -c fwmark)"
+# Every artifact this suite creates is SUFFIXED with the namespace
+# (/run/throughline/applied.tl-app, throughline-revert-tl-app.timer),
+# so checking the unsuffixed names asked a question the suite could not
+# fail: the one path that could leak was the one not being looked at.
+# Count the whole family instead.
 check "host has no applied record"    0 \
-  "$([ -e /run/throughline/applied ] && echo 1 || echo 0)"
+  "$(ls /run/throughline/ 2>/dev/null | wc -l)"
 check "host has no revert timer"      0 \
-  "$(systemctl is-active throughline-revert.timer 2>/dev/null | grep -c '^active$')"
+  "$(systemctl list-units --all --no-legend 'throughline*' 2>/dev/null | wc -l)"
 
 echo
 echo "=== $PASS passed, $FAIL failed, $SKIP skipped"

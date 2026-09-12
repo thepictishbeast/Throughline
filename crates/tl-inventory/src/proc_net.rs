@@ -313,7 +313,10 @@ mod tests {
         assert_eq!(rows[0].inode, 42);
 
         // One hex digit short: skipped, never padded into a guess.
-        let short = good.replace("B80D0120AB1670300000000002000000", "80D0120AB1670300000000002000000");
+        let short = good.replace(
+            "B80D0120AB1670300000000002000000",
+            "80D0120AB1670300000000002000000",
+        );
         assert!(parse_table(Proto::Tcp6, &short).is_empty());
     }
 
@@ -334,7 +337,7 @@ mod tests {
         for junk in [
             "",
             "garbage",
-            "   0: 3500007F:0035",                       // truncated
+            "   0: 3500007F:0035",                              // truncated
             "   0: ZZZZZZZZ:0035 00000000:0000 0A 0 0 0 0 0 1", // bad hex
             "   0: 3500007F:0035 00000000:0000 0A 0 0 0 notauid 0 1", // bad uid
         ] {

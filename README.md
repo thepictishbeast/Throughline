@@ -311,7 +311,7 @@ sudo scripts/netns-test.sh
 
 This builds three network namespaces and puts the **same destination
 address at the far end of both paths**. Whichever listener answers says
-which way the packet actually went; there is nothing to interpret. 19
+which way the packet actually went; there is nothing to interpret. 38
 cases: a selected program is rerouted and an unselected one is not, a
 cgroup selector does not match its sibling, the exclusions genuinely
 exclude, applying twice does not stack rules, revert leaves nothing

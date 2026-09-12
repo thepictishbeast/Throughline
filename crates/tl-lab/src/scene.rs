@@ -73,7 +73,10 @@ impl Kind {
     /// anyone comes here to do.
     #[must_use]
     pub const fn can_be_added(self) -> bool {
-        matches!(self, Self::Tunnel | Self::Tor | Self::Destination | Self::Internet)
+        // Internet is NOT here. There is one internet, it is always
+        // there because it really is, and a second deletable copy of it
+        // on the canvas would be a drawing rather than a description.
+        matches!(self, Self::Tunnel | Self::Tor | Self::Destination)
     }
 }
 
@@ -230,8 +233,14 @@ impl Scene {
     #[must_use]
     pub fn proposed(&self) -> (Vec<&Node>, Vec<&Link>) {
         (
-            self.nodes.iter().filter(|n| n.origin == Origin::Proposed).collect(),
-            self.links.iter().filter(|l| l.origin == Origin::Proposed).collect(),
+            self.nodes
+                .iter()
+                .filter(|n| n.origin == Origin::Proposed)
+                .collect(),
+            self.links
+                .iter()
+                .filter(|l| l.origin == Origin::Proposed)
+                .collect(),
         )
     }
 }
@@ -303,8 +312,14 @@ mod tests {
         let mut s = scene();
         assert!(!s.connect("firefox", "firefox", Origin::Proposed));
         assert!(s.connect("firefox", "eth0", Origin::Proposed));
-        assert!(!s.connect("firefox", "eth0", Origin::Proposed), "already joined");
-        assert!(!s.connect("eth0", "firefox", Origin::Proposed), "the other way round too");
+        assert!(
+            !s.connect("firefox", "eth0", Origin::Proposed),
+            "already joined"
+        );
+        assert!(
+            !s.connect("eth0", "firefox", Origin::Proposed),
+            "the other way round too"
+        );
         assert_eq!(s.links.len(), 1);
         assert!(!s.connect("firefox", "nowhere", Origin::Proposed));
     }
@@ -342,7 +357,11 @@ mod tests {
         assert!(Kind::Tunnel.can_be_added());
         assert!(Kind::Destination.can_be_added());
         assert!(!Kind::Host.can_be_added(), "there is one machine");
-        assert!(!Kind::Program.can_be_added(), "you cannot invent a running program");
+        assert!(!Kind::Internet.can_be_added(), "and one internet");
+        assert!(
+            !Kind::Program.can_be_added(),
+            "you cannot invent a running program"
+        );
         assert!(!Kind::Interface.can_be_added());
     }
 

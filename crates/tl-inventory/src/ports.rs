@@ -26,7 +26,10 @@ impl Default for EphemeralPorts {
     /// asking: a host that has tuned the range and cannot be read will be
     /// judged by a range it does not use.
     fn default() -> Self {
-        Self { low: 32768, high: 60999 }
+        Self {
+            low: 32768,
+            high: 60999,
+        }
     }
 }
 
@@ -76,7 +79,13 @@ mod tests {
         // Exact format of /proc/sys/net/ipv4/ip_local_port_range: two
         // numbers separated by a tab.
         let p = EphemeralPorts::parse("32768\t60999\n").unwrap();
-        assert_eq!(p, EphemeralPorts { low: 32768, high: 60999 });
+        assert_eq!(
+            p,
+            EphemeralPorts {
+                low: 32768,
+                high: 60999
+            }
+        );
         assert!(p.is_ephemeral(41000));
         assert!(!p.is_ephemeral(443));
     }

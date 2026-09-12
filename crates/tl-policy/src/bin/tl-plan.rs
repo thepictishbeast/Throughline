@@ -123,7 +123,10 @@ fn main() -> ExitCode {
                     return bad("not <selector>=<path>", &v);
                 };
                 match (parse_selector(sel), parse_path(path)) {
-                    (Some(s), Some(p)) => policy.rules.push(Rule { selector: s, path: p }),
+                    (Some(s), Some(p)) => policy.rules.push(Rule {
+                        selector: s,
+                        path: p,
+                    }),
                     _ => return bad("not <selector>=<path>", &v),
                 }
             }
@@ -150,7 +153,10 @@ fn main() -> ExitCode {
                 let Some(v) = val() else {
                     return bad("missing value", arg);
                 };
-                match v.split_once('=').and_then(|(n, s)| Some((n.to_owned(), s.parse().ok()?))) {
+                match v
+                    .split_once('=')
+                    .and_then(|(n, s)| Some((n.to_owned(), s.parse().ok()?)))
+                {
                     Some(pair) => host.rp_filter.push(pair),
                     None => return bad("not <iface>=<0|1|2>", &v),
                 }
@@ -268,8 +274,12 @@ fn main() -> ExitCode {
 
 fn parse_path(s: &str) -> Option<Path> {
     match s.split_once(':') {
-        Some(("vpn", i)) if !i.is_empty() => Some(Path::Vpn { interface: i.to_owned() }),
-        Some(("tor-via", i)) if !i.is_empty() => Some(Path::TorViaVpn { interface: i.to_owned() }),
+        Some(("vpn", i)) if !i.is_empty() => Some(Path::Vpn {
+            interface: i.to_owned(),
+        }),
+        Some(("tor-via", i)) if !i.is_empty() => Some(Path::TorViaVpn {
+            interface: i.to_owned(),
+        }),
         Some(_) => None,
         None => match s {
             "direct" => Some(Path::Direct),

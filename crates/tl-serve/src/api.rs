@@ -70,10 +70,12 @@ pub fn decode(s: &str) -> String {
 #[must_use]
 pub fn parse_path(s: &str) -> Option<Path> {
     match s.split_once(':') {
-        Some(("vpn", i)) if !i.is_empty() => Some(Path::Vpn { interface: i.to_owned() }),
-        Some(("tor-via", i)) if !i.is_empty() => {
-            Some(Path::TorViaVpn { interface: i.to_owned() })
-        }
+        Some(("vpn", i)) if !i.is_empty() => Some(Path::Vpn {
+            interface: i.to_owned(),
+        }),
+        Some(("tor-via", i)) if !i.is_empty() => Some(Path::TorViaVpn {
+            interface: i.to_owned(),
+        }),
         Some(_) => None,
         None => match s {
             "direct" => Some(Path::Direct),
@@ -120,7 +122,10 @@ pub fn policy_from_query(query: &str, base: Host) -> (Policy, Host, Vec<String>)
                     continue;
                 };
                 match (parse_selector(sel), parse_path(path)) {
-                    (Some(s), Some(p)) => policy.rules.push(Rule { selector: s, path: p }),
+                    (Some(s), Some(p)) => policy.rules.push(Rule {
+                        selector: s,
+                        path: p,
+                    }),
                     (None, _) => bad.push(format!("unknown selector {sel:?}")),
                     (_, None) => bad.push(format!("unknown path {path:?}")),
                 }
@@ -246,8 +251,10 @@ pub fn host_json(
         arr(host.interfaces.iter().cloned()),
         arr(host.cgroups.iter().cloned()),
         arr(active.iter().cloned()),
-        host.tor_trans_port.map_or("null".to_owned(), |p| p.to_string()),
-        host.tor_dns_port.map_or("null".to_owned(), |p| p.to_string()),
+        host.tor_trans_port
+            .map_or("null".to_owned(), |p| p.to_string()),
+        host.tor_dns_port
+            .map_or("null".to_owned(), |p| p.to_string()),
         host.tor_uid.map_or("null".to_owned(), |u| u.to_string()),
         s.join(",")
     )
@@ -354,7 +361,12 @@ mod tests {
         assert_eq!(p.rules[0].selector, Selector::Unit("nginx.service".into()));
         assert_eq!(p.rules[0].path, Path::Direct);
         assert_eq!(p.rules[1].selector, Selector::User(1000));
-        assert_eq!(p.rules[1].path, Path::Vpn { interface: "wg0".into() });
+        assert_eq!(
+            p.rules[1].path,
+            Path::Vpn {
+                interface: "wg0".into()
+            }
+        );
         assert_eq!(h.admin_peers, vec!["203.0.113.7".to_owned()]);
     }
 
@@ -393,10 +405,17 @@ mod tests {
     fn every_path_spelling_parses_and_nothing_else_does() {
         assert_eq!(parse_path("direct"), Some(Path::Direct));
         assert_eq!(parse_path("tor"), Some(Path::Tor));
-        assert_eq!(parse_path("vpn:wg0"), Some(Path::Vpn { interface: "wg0".into() }));
+        assert_eq!(
+            parse_path("vpn:wg0"),
+            Some(Path::Vpn {
+                interface: "wg0".into()
+            })
+        );
         assert_eq!(
             parse_path("tor-via:wg0"),
-            Some(Path::TorViaVpn { interface: "wg0".into() })
+            Some(Path::TorViaVpn {
+                interface: "wg0".into()
+            })
         );
         for bad in ["", "vpn", "vpn:", "tor-via:", "TOR", "tor ", "direct:x"] {
             assert_eq!(parse_path(bad), None, "{bad:?}");
@@ -408,8 +427,13 @@ mod tests {
         // From a terminal, "no countdown" is a decision about a machine
         // you can reach another way. From a browser it is a checkbox
         // somebody clicks past, and the cost is a host nobody can reach.
-        for (q, want) in [("deadman=0", 30u32), ("deadman=5", 30), ("deadman=99999", 3600),
-                          ("deadman=300", 300), ("", 120)] {
+        for (q, want) in [
+            ("deadman=0", 30u32),
+            ("deadman=5", 30),
+            ("deadman=99999", 3600),
+            ("deadman=300", 300),
+            ("", 120),
+        ] {
             let mut opts = tl_policy::apply::Options {
                 deadman_secs: 120,
                 ..tl_policy::apply::Options::default()
@@ -437,7 +461,10 @@ mod tests {
         assert!(c.contains("--rule 'unit:nginx.service=direct'"), "{c}");
         assert!(c.contains("--admin 203.0.113.7"), "{c}");
         assert!(c.contains("--apply"), "{c}");
-        assert!(c.contains("--deadman 120"), "the countdown is not optional: {c}");
+        assert!(
+            c.contains("--deadman 120"),
+            "the countdown is not optional: {c}"
+        );
     }
 
     #[test]
@@ -462,7 +489,10 @@ mod tests {
         let (p, h, _) = policy_from_query("rule=unit:evil%22name.service=tor", host());
         let j = plan_json(&p, &h, &[], "");
         assert!(!j.contains("evil\"name"), "unescaped quote reached the UI");
-        assert!(j.contains("evil\\\"name") || j.contains("evil%22name"), "{j}");
+        assert!(
+            j.contains("evil\\\"name") || j.contains("evil%22name"),
+            "{j}"
+        );
     }
 
     #[test]

@@ -196,7 +196,10 @@ pub fn holders_by_inode(root: &Path) -> HashMap<u64, Holder> {
 /// `socket:[12345]` → `12345`.
 #[must_use]
 pub fn socket_inode(link: &str) -> Option<u64> {
-    link.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
+    link.strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
 }
 
 /// Attach an owner to a socket inode.
@@ -217,7 +220,9 @@ pub fn attribute(inode: u64, holders: &HashMap<u64, Holder>) -> Owner {
     if inode == 0 {
         return Owner::Unowned;
     }
-    holders.get(&inode).map_or(Owner::Unowned, |h| h.owner.clone())
+    holders
+        .get(&inode)
+        .map_or(Owner::Unowned, |h| h.owner.clone())
 }
 
 #[cfg(test)]
@@ -270,7 +275,13 @@ mod tests {
         );
         assert_eq!(o.kind(), "app");
         assert_eq!(o.name(), Some("app-firefox-1234"));
-        assert!(matches!(o, Owner::UserApp { uid_hint: Some(1000), .. }));
+        assert!(matches!(
+            o,
+            Owner::UserApp {
+                uid_hint: Some(1000),
+                ..
+            }
+        ));
     }
 
     #[test]

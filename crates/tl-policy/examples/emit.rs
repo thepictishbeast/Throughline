@@ -12,9 +12,14 @@ fn main() {
         FsPath::new("/sys"),
         FsPath::new("/etc/tor/torrc"),
     );
-    let unit = std::env::args().nth(1).unwrap_or_else(|| "cron.service".to_owned());
+    let unit = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "cron.service".to_owned());
     let policy = Policy {
-        rules: vec![Rule { selector: Selector::Unit(unit), path: Path::Tor }],
+        rules: vec![Rule {
+            selector: Selector::Unit(unit),
+            path: Path::Tor,
+        }],
         default_path: Path::Direct,
     };
     let plan = policy.compile(&host);

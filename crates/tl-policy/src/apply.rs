@@ -48,14 +48,23 @@ pub enum ApplyError {
     /// The plan should not be applied. Nothing was attempted.
     Refused(Vec<Refusal>),
     /// A command failed, and everything already done has been undone.
-    RolledBack { failed: String, stderr: String },
+    RolledBack {
+        failed: String,
+        stderr: String,
+    },
     /// A command failed AND the rollback also failed. The machine is in a
     /// state nobody planned; the remaining steps are listed so a person
     /// can finish by hand.
-    Stranded { failed: String, remaining: Vec<String> },
+    Stranded {
+        failed: String,
+        remaining: Vec<String>,
+    },
     /// The new connection made after applying did not work, so the policy
     /// was reverted.
-    VerificationFailed { target: String, detail: String },
+    VerificationFailed {
+        target: String,
+        detail: String,
+    },
     /// There is nothing applied to act on.
     NothingApplied,
     Io(std::io::Error),
@@ -124,7 +133,12 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { deadman_secs: 120, verify: None, dry_run: false, netns: None }
+        Self {
+            deadman_secs: 120,
+            verify: None,
+            dry_run: false,
+            netns: None,
+        }
     }
 }
 
@@ -142,7 +156,10 @@ impl Applied {
     #[must_use]
     pub fn serialise(&self) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "# throughline: applied. Each line undoes one thing, in order.");
+        let _ = writeln!(
+            s,
+            "# throughline: applied. Each line undoes one thing, in order."
+        );
         let _ = writeln!(s, "# deadman={}", self.deadman);
         for c in &self.revert {
             let _ = writeln!(s, "{c}");
@@ -188,7 +205,10 @@ fn run(netv: Option<&str>, cmd: &str) -> Result<(), (String, String)> {
     if out.status.success() {
         Ok(())
     } else {
-        Err((cmd.to_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
+        Err((
+            cmd.to_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ))
     }
 }
 
@@ -237,8 +257,15 @@ pub fn apply(
         for c in &plan.ip {
             println!("{}", argv(ns, c).join(" "));
         }
-        println!("{} nft -f - <<'RULES'\n{}RULES", argv(ns, "").join(" "), plan.nft);
-        return Ok(Applied { revert: plan.revert.clone(), deadman: false });
+        println!(
+            "{} nft -f - <<'RULES'\n{}RULES",
+            argv(ns, "").join(" "),
+            plan.nft
+        );
+        return Ok(Applied {
+            revert: plan.revert.clone(),
+            deadman: false,
+        });
     }
 
     // Routing first. An `ip rule` matching a mark nothing sets does
@@ -259,7 +286,10 @@ pub fn apply(
         return Err(ApplyError::RolledBack { failed, stderr });
     }
 
-    let mut applied = Applied { revert: plan.revert.clone(), deadman: false };
+    let mut applied = Applied {
+        revert: plan.revert.clone(),
+        deadman: false,
+    };
 
     if opts.deadman_secs > 0 {
         arm(ns, &applied.revert, opts.deadman_secs)?;
@@ -271,7 +301,10 @@ pub fn apply(
     if let Some(target) = &opts.verify {
         if let Err(detail) = dial(ns, target) {
             let _ = revert(opts);
-            return Err(ApplyError::VerificationFailed { target: target.clone(), detail });
+            return Err(ApplyError::VerificationFailed {
+                target: target.clone(),
+                detail,
+            });
         }
     }
     Ok(applied)
@@ -300,7 +333,10 @@ fn undo(ns: Option<&str>, cmds: &[String]) -> Result<(), ApplyError> {
     // An undo step failing because the thing was not there is normal, so
     // this is not treated as stranding unless everything failed.
     if !left.is_empty() && left.len() == cmds.len() {
-        return Err(ApplyError::Stranded { failed: "rollback".to_owned(), remaining: left });
+        return Err(ApplyError::Stranded {
+            failed: "rollback".to_owned(),
+            remaining: left,
+        });
     }
     Ok(())
 }
@@ -326,7 +362,10 @@ fn nft_load(ns: Option<&str>, ruleset: &str) -> Result<(), (String, String)> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(("nft -f -".to_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
+        Err((
+            "nft -f -".to_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ))
     }
 }
 
@@ -362,13 +401,20 @@ fn arm(ns: Option<&str>, revert: &[String], secs: u32) -> Result<(), ApplyError>
 }
 
 fn unit_name(ns: Option<&str>) -> String {
-    ns.map_or_else(|| DEADMAN_UNIT.to_owned(), |n| format!("{DEADMAN_UNIT}-{n}"))
+    ns.map_or_else(
+        || DEADMAN_UNIT.to_owned(),
+        |n| format!("{DEADMAN_UNIT}-{n}"),
+    )
 }
 
 fn disarm(ns: Option<&str>) -> std::io::Result<()> {
     let unit = unit_name(ns);
-    let _ = Command::new("systemctl").args(["stop", &format!("{unit}.timer")]).output()?;
-    let _ = Command::new("systemctl").args(["reset-failed", &unit]).output();
+    let _ = Command::new("systemctl")
+        .args(["stop", &format!("{unit}.timer")])
+        .output()?;
+    let _ = Command::new("systemctl")
+        .args(["reset-failed", &unit])
+        .output();
     Ok(())
 }
 
@@ -378,9 +424,15 @@ fn dial(ns: Option<&str>, target: &str) -> Result<(), String> {
     // namespace; `bash`'s /dev/tcp avoids needing a helper binary.
     let v = argv(
         ns,
-        &format!("timeout 6 bash -c exec3<>/dev/tcp/{}", target.replace(':', "/")),
+        &format!(
+            "timeout 6 bash -c exec3<>/dev/tcp/{}",
+            target.replace(':', "/")
+        ),
     );
-    let out = Command::new(&v[0]).args(&v[1..]).output().map_err(|e| e.to_string())?;
+    let out = Command::new(&v[0])
+        .args(&v[1..])
+        .output()
+        .map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(())
     } else {
@@ -508,7 +560,12 @@ pub fn status(opts: &Options) -> Status {
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "active");
 
-    Status { recorded, table_present, rules_present, deadman_armed }
+    Status {
+        recorded,
+        table_present,
+        rules_present,
+        deadman_armed,
+    }
 }
 
 fn capture(ns: Option<&str>, cmd: &str) -> Option<String> {
@@ -550,7 +607,10 @@ mod tests {
         };
         let back = Applied::parse(&a.serialise());
         assert_eq!(back, a);
-        let off = Applied { deadman: false, ..a.clone() };
+        let off = Applied {
+            deadman: false,
+            ..a.clone()
+        };
         assert_eq!(Applied::parse(&off.serialise()), off);
     }
 
@@ -578,7 +638,10 @@ mod tests {
             ],
             ..Plan::default()
         };
-        assert_eq!(undo_for(&plan, 2), vec!["nft delete table inet throughline", "undo-a", "undo-b"]);
+        assert_eq!(
+            undo_for(&plan, 2),
+            vec!["nft delete table inet throughline", "undo-a", "undo-b"]
+        );
         assert_eq!(undo_for(&plan, 1), vec!["undo-a", "undo-b"]);
         assert_eq!(undo_for(&plan, 0), vec!["undo-a", "undo-b"]);
     }
@@ -587,14 +650,38 @@ mod tests {
     fn every_disagreement_between_plan_and_kernel_has_a_name() {
         // The point of a read-back: each of these is a real state the
         // machine can be in, and not one of them announces itself.
-        let s = |r, t, u| Status { recorded: r, table_present: t, rules_present: u, deadman_armed: false };
+        let s = |r, t, u| Status {
+            recorded: r,
+            table_present: t,
+            rules_present: u,
+            deadman_armed: false,
+        };
         assert_eq!(s(false, false, false).describe(), "nothing applied");
-        assert!(s(true, true, true).describe().starts_with("applied and confirmed"));
+        assert!(
+            s(true, true, true)
+                .describe()
+                .starts_with("applied and confirmed")
+        );
         assert!(s(true, false, true).describe().contains("flush ruleset"));
-        assert!(s(true, true, false).describe().contains("marks lead nowhere"));
-        assert!(s(false, true, false).describe().contains("NOTHING RECORDED"));
-        assert!(s(true, false, false).describe().contains("reverted by hand"));
-        let armed = Status { deadman_armed: true, ..s(true, true, true) };
+        assert!(
+            s(true, true, false)
+                .describe()
+                .contains("marks lead nowhere")
+        );
+        assert!(
+            s(false, true, false)
+                .describe()
+                .contains("NOTHING RECORDED")
+        );
+        assert!(
+            s(true, false, false)
+                .describe()
+                .contains("reverted by hand")
+        );
+        let armed = Status {
+            deadman_armed: true,
+            ..s(true, true, true)
+        };
         assert!(armed.describe().contains("unless confirmed"));
     }
 
@@ -603,7 +690,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tl-nft-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("nftables.conf");
-        std::fs::write(&f, "#!/usr/sbin/nft -f\n\nflush ruleset\n\ntable inet filter {}\n").unwrap();
+        std::fs::write(
+            &f,
+            "#!/usr/sbin/nft -f\n\nflush ruleset\n\ntable inet filter {}\n",
+        )
+        .unwrap();
         assert!(baseline_flushes(&f));
         std::fs::write(&f, "#!/usr/sbin/nft -f\ntable inet filter {}\n").unwrap();
         assert!(!baseline_flushes(&f));
@@ -615,7 +706,10 @@ mod tests {
     fn a_namespaced_run_keeps_its_own_record_and_its_own_timer() {
         // So a test suite cannot revert the host's policy, or be reverted
         // by it.
-        let ns = Options { netns: Some("tl-app".into()), ..Options::default() };
+        let ns = Options {
+            netns: Some("tl-app".into()),
+            ..Options::default()
+        };
         assert_ne!(state_path(&ns), state_path(&Options::default()));
         assert_eq!(unit_name(Some("tl-app")), "throughline-revert-tl-app");
         assert_eq!(unit_name(None), DEADMAN_UNIT);
@@ -641,11 +735,17 @@ mod tests {
     fn undoing_nothing_says_so_in_words_about_the_machine() {
         // Not "No such file or directory (os error 2)", which is a true
         // statement about a path and tells nobody anything.
-        let opts = Options { netns: Some("tl-no-such-ns".into()), ..Options::default() };
+        let opts = Options {
+            netns: Some("tl-no-such-ns".into()),
+            ..Options::default()
+        };
         let e = revert(&opts).unwrap_err();
         assert!(matches!(e, ApplyError::NothingApplied), "{e:?}");
         assert!(e.to_string().contains("nothing is applied"));
-        assert!(matches!(confirm(&opts).unwrap_err(), ApplyError::NothingApplied));
+        assert!(matches!(
+            confirm(&opts).unwrap_err(),
+            ApplyError::NothingApplied
+        ));
     }
 
     #[test]

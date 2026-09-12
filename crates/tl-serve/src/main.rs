@@ -69,7 +69,10 @@ fn main() {
         // Printed here and nowhere else. This is the whole point: a page
         // that merely reached this server cannot know it, and a person at
         // the terminal can read it off.
-        println!("  to change routing from the browser, paste this once: {}", gate.token());
+        println!(
+            "  to change routing from the browser, paste this once: {}",
+            gate.token()
+        );
     }
     for stream in listener.incoming() {
         match stream {
@@ -255,7 +258,11 @@ fn handle(mut stream: TcpStream, gate: &gate::Gate) -> std::io::Result<()> {
             }
             let out = api::do_write(p, query);
             (
-                if out.starts_with("{\"error\"") { "400 Bad Request" } else { "200 OK" },
+                if out.starts_with("{\"error\"") {
+                    "400 Bad Request"
+                } else {
+                    "200 OK"
+                },
                 "application/json; charset=utf-8",
                 out,
             )
@@ -300,12 +307,7 @@ fn read_capped(reader: &mut impl BufRead, buf: &mut String) -> std::io::Result<u
     reader.by_ref().take(MAX_LINE).read_line(buf)
 }
 
-fn respond(
-    stream: &mut TcpStream,
-    status: &str,
-    ctype: &str,
-    body: &str,
-) -> std::io::Result<()> {
+fn respond(stream: &mut TcpStream, status: &str, ctype: &str, body: &str) -> std::io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 {status}\r\n\
@@ -332,7 +334,7 @@ mod tests {
             "LocalHost:7644",
             "127.0.0.1",
             "127.0.0.1:7644",
-            "127.1.2.3",   // 127.0.0.0/8 is loopback in full
+            "127.1.2.3", // 127.0.0.0/8 is loopback in full
             "[::1]",
             "[::1]:7644",
         ] {
@@ -348,14 +350,14 @@ mod tests {
         for h in [
             "evil.example",
             "evil.example:7644",
-            "127.0.0.1.evil.example",     // prefix that looks loopback
+            "127.0.0.1.evil.example", // prefix that looks loopback
             "localhost.evil.example",
-            "[::1].evil.example",         // starts loopback, is not
+            "[::1].evil.example", // starts loopback, is not
             "[::1]evil.example",
             "[::1]:7644.evil",
             "localhost:not-a-port",
             "127.0.0.1:1:2",
-            "0.0.0.0",                    // routable to us, not a local name
+            "0.0.0.0", // routable to us, not a local name
             "192.168.1.10:7644",
             "[fe80::1]",
         ] {

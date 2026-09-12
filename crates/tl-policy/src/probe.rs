@@ -138,7 +138,9 @@ pub fn admin_candidates(proc_root: &FsPath) -> Vec<AdminSession> {
         .iter()
         .filter(|f| {
             f.socket.state == tl_inventory::proc_net::State::Listen
-                && f.holder.as_ref().is_some_and(|h| h.comm.starts_with("sshd"))
+                && f.holder
+                    .as_ref()
+                    .is_some_and(|h| h.comm.starts_with("sshd"))
         })
         .map(|f| f.socket.local_port)
         .collect();
@@ -152,7 +154,10 @@ pub fn admin_candidates(proc_root: &FsPath) -> Vec<AdminSession> {
             continue;
         }
         let peer = normalise(&f.socket.remote_addr.to_string());
-        if out.iter().any(|c| c.peer == peer && c.port == f.socket.local_port) {
+        if out
+            .iter()
+            .any(|c| c.peer == peer && c.port == f.socket.local_port)
+        {
             continue;
         }
         let holder = f.holder.as_ref();
@@ -212,10 +217,8 @@ pub fn active_cgroups(proc_root: &FsPath) -> Vec<String> {
         .filter(|f| f.direction(&listeners) == Direction::Outbound)
         .filter_map(|f| f.holder.as_ref())
         .filter_map(|h| {
-            let body = std::fs::read_to_string(
-                proc_root.join(h.pid.to_string()).join("cgroup"),
-            )
-            .ok()?;
+            let body =
+                std::fs::read_to_string(proc_root.join(h.pid.to_string()).join("cgroup")).ok()?;
             let path = body
                 .lines()
                 .find(|l| l.starts_with("0::"))?
@@ -445,7 +448,11 @@ mod tests {
         // Safe: getuid cannot fail and has no side effects.
         let expected = unsafe { libc_geteuid() };
         assert_eq!(uid, expected, "parsed Uid: line must be the effective uid");
-        assert_eq!(effective_uid(FsPath::new("/proc"), 0), None, "pid 0 has no status");
+        assert_eq!(
+            effective_uid(FsPath::new("/proc"), 0),
+            None,
+            "pid 0 has no status"
+        );
     }
 
     /// `geteuid(2)` without pulling in a crate for one number.
@@ -463,7 +470,11 @@ mod tests {
         let f = dir.join("login.defs");
         std::fs::write(&f, "# UID_MIN 500\nUID_MAX 60000\nUID_MIN 2000\n").unwrap();
         assert_eq!(uid_min(&f), 2000);
-        assert_eq!(uid_min(FsPath::new("/nonexistent")), 1000, "documented fallback");
+        assert_eq!(
+            uid_min(FsPath::new("/nonexistent")),
+            1000,
+            "documented fallback"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -510,7 +521,10 @@ mod tests {
                     && f.direction(&listeners) == Direction::Inbound
                     && normalise(&f.socket.remote_addr.to_string()) == *p
             });
-            assert!(live, "{p} is not an established session ({half_open} half-open rows present)");
+            assert!(
+                live,
+                "{p} is not an established session ({half_open} half-open rows present)"
+            );
         }
     }
 
@@ -534,6 +548,10 @@ mod tests {
         let ifs = interfaces(FsPath::new("/sys"));
         assert!(ifs.iter().any(|i| i == "lo"), "{ifs:?}");
         let cg = cgroups(FsPath::new("/sys"));
-        assert!(cg.iter().any(|c| c.starts_with("system.slice/")), "{}", cg.len());
+        assert!(
+            cg.iter().any(|c| c.starts_with("system.slice/")),
+            "{}",
+            cg.len()
+        );
     }
 }

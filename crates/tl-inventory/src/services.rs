@@ -57,13 +57,17 @@ impl ServiceNames {
             let (Some(port), Some(proto)) = (parts.next(), parts.next()) else {
                 continue;
             };
-            let Ok(port) = port.parse::<u16>() else { continue };
+            let Ok(port) = port.parse::<u16>() else {
+                continue;
+            };
             let proto = match proto {
                 "tcp" => Proto::Tcp,
                 "udp" => Proto::Udp,
                 _ => continue, // sctp, ddp and friends: not sockets we read
             };
-            by_port.entry((port, proto)).or_insert_with(|| name.to_owned());
+            by_port
+                .entry((port, proto))
+                .or_insert_with(|| name.to_owned());
         }
         Self { by_port }
     }
