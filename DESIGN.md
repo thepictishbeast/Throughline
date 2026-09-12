@@ -100,18 +100,36 @@ Simple enough that somebody with no technical knowledge can use it.
 Advanced enough to genuinely configure and administer a network securely.
 Both, not a compromise between them.
 
-## Open question, deliberately
+## Reuse before building: the field, measured
 
 Paul's suggestion, and his standing "reuse before building" rule, both
-point at forking or extending an existing FOSS network simulator rather
-than writing a canvas from scratch — taking its GUI conventions, its icon
-set, and possibly its whole editor.
+point at forking an existing FOSS simulator rather than writing a canvas.
+Every candidate, measured against the GitHub API on **2026-09-12** —
+commits in the preceding 90 days, because a project's own README is not
+evidence that anyone is still there:
 
-This is being evaluated before more of the canvas is written. The
-candidates worth weighing are GNS3 (Qt, GPLv3, the interaction model
-everyone knows), CORE (already uses Linux network namespaces, which is
-exactly the execution model here), Kathará, Containerlab, imunes,
-mininet's MiniEdit, and Shadow (which simulates Tor specifically).
+| Project | Commits/90d | Licence | Language | GUI | Engine |
+| --- | --- | --- | --- | --- | --- |
+| containerlab | 100+ | BSD-3 | Go | no (a VS Code extension has one) | containers + veth |
+| Shadow | 100+ | unclear | Rust | no | deterministic sim; runs real Tor |
+| GNS3 | 49 + 19 | **GPL-3** | Python/Qt5 | yes, 208k lines | VMs, dynamips, docker |
+| imunes | 58 | unclear | Tcl/Tk | yes, 59k lines | netns + docker |
+| vscode-containerlab | 30 | Apache-2 | TypeScript | yes, drag-drop | containerlab |
+| **CORE** | **0** | **BSD-2** | Python/tk | yes, 12k lines | **netns — exact match** |
+| Kathará | 1 | GPL-3 | Python | no | docker |
+| mininet | 0 (since 2024) | BSD-3 | Python | MiniEdit, ancient | netns |
+| cloonix | 0 (since 2025) | unclear | C | yes | KVM |
+
+Two more that nobody names in this category but that solve *our* half —
+per-application connection visibility and rules, with a GUI —
+**OpenSnitch** (39 commits/90d) and **Portmaster** (45). Neither draws a
+topology. Both are worth reading for how they attribute a connection to a
+process: eBPF, not polling `/proc`, which is also the answer to the
+Android blindness above.
+
+Note for anyone reading Paul's original reference list: **netlab
+("ipspace") has no GUI at all.** If a look is being pictured from there,
+it comes from the blog's diagrams, not from the tool.
 
 The thing none of them do, and which is the whole point here, is **apply
 the topology to the real host afterwards**. That part stays ours
@@ -175,27 +193,30 @@ cannot be reached from the device he administers from, and where it can
 be reached it reports an empty machine without saying it is blind. The
 rewrite is not polish.
 
-# The question this forces: where does it run?
+# The question this forces: where does it run? — ANSWERED
 
 Paul administers this machine from a phone, over SSH. A native desktop
-GUI needs a display. A headless server has none. So "make it native"
-and "use it on the server" pull in opposite directions, and the design
-has to answer it rather than pick one and hope.
+GUI needs a display. A headless server has none. So "make it native" and
+"use it on the server" pulled in opposite directions, and the Termux
+session that found failure 1 looked like a requirement.
 
-The honest options:
+It was not. Paul, asked directly: *"i was just testing it, we need a GUI
+primarily but we can also make a TUI also."*
 
-1. **The GUI runs on the laptop and reads a remote host over SSH.** The
-   canvas is local; the machine under inspection is wherever you point
-   it. This also gives the "import a topology from another host" feature
-   for free, and means one tool can plan several machines.
-2. **A TUI for servers.** Works over SSH from Termux, needs no display,
-   no X forwarding. The same core crates underneath, a different front
-   end. This is the thing that would actually have worked tonight.
-3. **X forwarding.** Works, heavy, and poor over a phone.
+So:
 
-1 and 2 are complementary and share everything below the front end,
-which is the argument for keeping `tl-inventory`, `tl-detect`,
-`tl-policy`, `tl-sim` and `tl-grade` free of any UI at all.
+1. **The GUI is the product.** It runs where there is a display — a
+   laptop — and reads the host it is pointed at, which may be this one
+   over SSH. That also gives "plan another machine from this one" for
+   free.
+2. **A TUI comes after it**, for a server over SSH with no display. Not
+   a fallback for a failed GUI: a second front end on the same core.
+3. X forwarding is not a plan.
+
+Both share everything below the front end, which is the whole argument
+for keeping `tl-inventory`, `tl-detect`, `tl-policy`, `tl-sim` and
+`tl-grade` free of any UI at all. A core crate that cannot be driven by
+a TUI has a bug, not a feature.
 
 # What this host actually has, that the tool says nothing about
 
@@ -220,37 +241,84 @@ any networks".
 
 # Decisions taken
 
-## Simulation engine: CORE, over gRPC
+## Engine AND front end: fork CORE
 
 [CORE](https://github.com/coreemu/core) (Common Open Research Emulator),
-BSD-2-Clause, actively maintained, Python + C.
+BSD-2-Clause, Python + C.
 
 It already does the entire "actually simulate" half of the brief:
 topologies built from Linux network namespaces, link impairment
 (bandwidth, delay, loss, jitter), real applications running inside nodes,
 and an **RJ45 node that bridges the emulated topology to a real host
-interface**. Its own GUI drives all of it through a gRPC API, which means
-any front end can.
+interface**. Its own GUI drives all of it through a gRPC API.
+
+### ⚠ Correction: CORE is not actively maintained
+
+An earlier version of this file said "actively maintained". **That was
+false, and the decision to build on CORE was taken on the strength of
+it.** Measured on 2026-09-12 against the GitHub API:
+
+* last commit on the default branch **2025-05-19** — 16 months
+* **0** commits in the preceding 90 days
+* 12,240 lines of Python/tkinter GUI, 37,156 lines of Python daemon,
+  plus C helpers
+
+The decision survives the correction, because Paul asked three times to
+fork an existing simulator rather than write one, and among the
+permissively-licensed candidates CORE is the only one whose execution
+model (network namespaces) is the one this tool needs. But the cost is
+now stated honestly: **forking a dormant project means owning it.**
+
+### What was verified before committing to the fork
+
+Not assumed — run, read, and measured:
+
+* **The GUI is a client, not a canvas.** `CanvasNode.__init__` takes a
+  `core.api.grpc.wrappers.Node`; the thing on the screen *is* a gRPC
+  object. Started without a daemon it renders an empty grid, a menu bar
+  containing only *Help*, and a `Setup Error` dialog. There is no
+  "borrow the canvas and leave the rest" option: a fork ships the
+  daemon.
+* **Our facts fit without patching its protobuf.** `Node` has no
+  free-form field, but `Session.metadata` is a persisted
+  `map<string, string>`, and `CustomNodesDialog` defines node types by
+  name and icon. So a pid, a live flow, a grade, and node kinds like
+  Tor / WireGuard / ISP all ride in its own save format.
+* **Its build does not work against current dependencies.** Generating
+  its gRPC stubs today produces gencode 7.35.1 against a 5.29.3 runtime
+  and the GUI dies on import. Their own pins are required
+  (`grpcio 1.69.0`, `protobuf 5.29.3`). This is the first thing 16
+  dormant months costs you, and it will not be the last.
+* **The daemon needs C helpers.** `vnoded` and `vcmd`, built with
+  autotools from `netns/`, are hard requirements, alongside `ip`, `nft`,
+  `tc`, `ethtool`, `mount` and `sysctl`.
+
+### Where each piece runs
+
+The GUI and `core-daemon` run together on the machine with a display —
+a laptop — with the daemon in a container or VM. The host being read and
+configured is reached over SSH by the Rust binaries, which need no
+daemon and no display.
+
+This keeps CORE's networking entirely away from any production machine
+while still letting the canvas plan one.
 
 What stays ours: reading the real host, detecting its networks, grading a
 topology, and applying it. CORE does none of that and is not trying to.
 
 **The cost, stated:** Throughline stops being one static binary. It gains
-a Python daemon that must be installed and running.
+a Python daemon, C helpers, and a dormant upstream.
 
-## Front end: our own canvas
+## Front end: CORE's, modified
 
-Rust + egui, borrowing the conventions that GNS3 has already proven —
-a named-port picker for links rather than drag-from-handle, per-link-END
-status shown in **colour and shape** (green round up, red square down, so
-it survives colourblindness), marquee select, Ship/middle-drag pan,
-Ctrl+wheel zoom, Delete to delete, explicit align rather than grid snap.
+Not our own canvas. The conventions worth keeping from GNS3 are still
+the target — per-link-END status in **colour and shape** (green round up,
+red square down, so it survives colourblindness), marquee select,
+middle-drag pan, Ctrl+wheel zoom — but they get implemented inside the
+forked GUI rather than in a canvas written from scratch.
 
-Not CORE's tkinter GUI, which has the right interaction model and the
-wrong decade, and is built around imaginary labs rather than a real host.
-
-Everything below the front end stays UI-free, so a TUI for servers can
-sit on the same core later.
+Everything below the front end stays UI-free, so the TUI can sit on the
+same core. A core crate that cannot be driven by a TUI has a bug.
 
 ## ⚠ CORE must not be installed on this host as-is
 
