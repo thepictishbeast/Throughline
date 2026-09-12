@@ -169,7 +169,7 @@ check "no policy: traffic takes the default route" ISP "$(ask app)"
 # -------------------------------------------------------------------------
 echo
 echo "-- a selected program is rerouted, an unselected one is not"
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --cgroup tl-test/other \
            --rule cgroup:tl-test/app=vpn:tl-w0 --default direct
 check "selected cgroup leaves by the tunnel"      VPN "$(ask app)"
@@ -180,7 +180,7 @@ check "after revert, the selected one is normal"  ISP "$(ask app)"
 # -------------------------------------------------------------------------
 echo
 echo "-- a cgroup selector must not match a sibling or the parent"
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/other \
            --rule cgroup:tl-test/other=vpn:tl-w0 --default direct
 check "the named sibling is rerouted"             VPN "$(ask other)"
@@ -190,7 +190,7 @@ clear_plan
 # -------------------------------------------------------------------------
 echo
 echo "-- everything goes by the tunnel except what is excluded"
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --default vpn:tl-w0
 check "the default path applies to any program"   VPN "$(ask app)"
 clear_plan
@@ -198,7 +198,7 @@ clear_plan
 # -------------------------------------------------------------------------
 echo
 echo "-- an excluded address stays on the normal route"
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --admin 10.9.9.9 --default vpn:tl-w0
 check "an excluded destination is not rerouted"   ISP "$(ask app)"
 clear_plan
@@ -208,7 +208,7 @@ echo
 echo "-- strict reverse-path filtering breaks policy routing silently"
 ip netns exec tl-app sysctl -qw net.ipv4.conf.all.rp_filter=1
 ip netns exec tl-app sysctl -qw net.ipv4.conf.tl-w0.rp_filter=1
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --default vpn:tl-w0
 check "with rp_filter strict the reply is dropped" UNREACHABLE "$(ask app)"
 ip netns exec tl-app sysctl -qw net.ipv4.conf.all.rp_filter=2
@@ -218,15 +218,28 @@ clear_plan
 
 echo
 echo "-- and the compiler refuses to emit that plan in the first place"
-if "$PLAN" --bare --iface tl-w0 --rp-filter all=1 --rp-filter tl-w0=1 \
+if "$PLAN" --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=1 --rp-filter tl-w0=1 \
            --default vpn:tl-w0 >/dev/null 2>&1; then
   got=allowed; else got=refused; fi
 check "a strict-rp_filter plan is refused"         refused "$got"
 
 # -------------------------------------------------------------------------
 echo
-echo "-- a rule naming a cgroup that is not there is refused"
+echo "-- routing into a tunnel whose own endpoint is unknown is refused"
+# 10.9.2.2 is the far end of the tunnel link: the address the tunnel
+# itself must reach OUTSIDE the tunnel. Route that into the tunnel and
+# the tunnel can never be built. Every case above now declares it, so
+# this is the case that proves the refusal is real rather than assumed --
+# the protection was driven by a field nothing ever filled in.
 if "$PLAN" --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+           --default vpn:tl-w0 >/dev/null 2>&1; then
+  got=allowed; else got=refused; fi
+check "a tunnel with no declared endpoint is refused" refused "$got"
+
+# -------------------------------------------------------------------------
+echo
+echo "-- a rule naming a cgroup that is not there is refused"
+if "$PLAN" --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --rule cgroup:tl-test/ghost=vpn:tl-w0 \
            --default direct >/dev/null 2>&1; then
   got=allowed; else got=refused; fi
@@ -235,9 +248,9 @@ check "a missing cgroup is refused"                refused "$got"
 # -------------------------------------------------------------------------
 echo
 echo "-- applying twice must not stack duplicate rules"
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --rule cgroup:tl-test/app=vpn:tl-w0 --default direct
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --rule cgroup:tl-test/app=vpn:tl-w0 --default direct
 n=$(ip netns exec tl-app nft list table inet throughline | grep -cE 'meta mark set 0x')
 check "one mark rule after two applies"           1 "$n"
@@ -247,7 +260,7 @@ clear_plan
 # -------------------------------------------------------------------------
 echo
 echo "-- revert leaves nothing behind"
-apply_plan --bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2 \
+apply_plan --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2 \
            --cgroup tl-test/app --rule cgroup:tl-test/app=vpn:tl-w0 --default direct
 clear_plan
 t=$(netns tl-app nft list tables | wc -l)
@@ -261,7 +274,7 @@ check "traffic is back to normal"                 ISP "$(ask app)"
 # them into a kernel and take them out again without stranding anybody.
 echo
 echo "-- applying through the tool, not by hand"
-APPLY=(--bare --iface tl-w0 --rp-filter all=2 --rp-filter tl-w0=2
+APPLY=(--bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=2 --rp-filter tl-w0=2
        --cgroup tl-test/app --rule cgroup:tl-test/app=vpn:tl-w0 --default direct
        --netns tl-app)
 "$PLAN" "${APPLY[@]}" --apply --deadman 0 >/dev/null 2>&1
@@ -312,7 +325,7 @@ check "traffic is normal"  ISP "$(ask app)"
 echo
 echo "-- a refused plan changes nothing at all"
 before=$(netns tl-app nft list tables 2>/dev/null | wc -l)
-"$PLAN" --bare --iface tl-w0 --rp-filter all=1 --rp-filter tl-w0=1 \
+"$PLAN" --bare --iface tl-w0 --endpoint 10.9.2.2 --rp-filter all=1 --rp-filter tl-w0=1 \
         --default vpn:tl-w0 --netns tl-app --apply --deadman 0 >/dev/null 2>&1
 check "a refused plan exits non-zero"      1 "$?"
 check "and applied nothing"                "$before" "$(netns tl-app nft list tables 2>/dev/null | wc -l)"
