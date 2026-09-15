@@ -1,12 +1,12 @@
 # Throughline
 
 **See everything your Linux machine is talking to, and change where it
-goes — by dragging.**
+goes.**
 
-Two screens. The first shows every network connection on the machine and
-which program opened it. The second lets you drag a program into a box —
-*Straight out*, *Through the VPN*, *Through Tor* — and shows you exactly
-what that would do before anything happens.
+It reads the machine, attributes every connection to the program that
+opened it, and can reroute chosen programs through a VPN or Tor — showing
+you exactly what that would do before anything happens, and taking it
+back out on a timer if you do not confirm.
 
 ---
 
@@ -17,22 +17,39 @@ You need Rust. If you do not have it: <https://rustup.rs>
 ```bash
 git clone https://github.com/thepictishbeast/Throughline
 cd Throughline
-cargo run --release -p tl-serve
+cargo run --release -p tl-inventory --bin tl-observe
 ```
 
-Open <http://127.0.0.1:7644>. That is the whole install — no packages, no
-config file, no daemon.
+That prints every connection on this machine as JSON, and exits. No
+packages, no config file, no daemon, no port.
 
-Run it with `sudo` to see other users' processes too:
+Run it with `sudo` to see other users' processes too — most sockets on a
+machine belong to somebody else:
 
 ```bash
-sudo -E cargo run --release -p tl-serve
+sudo -E cargo run --release -p tl-inventory --bin tl-observe
 ```
 
-It listens on your own machine only. There is no flag to change that, on
-purpose: a screen listing every program on your computer and everywhere
-it connects is a map of your machine, and it does not get a port on the
-network.
+Because it is a program that prints and exits rather than a server, it
+reads a machine you are not sitting at without opening anything:
+
+```bash
+ssh someserver tl-observe
+```
+
+The first field of the output is always `visibility`, which says whether
+the reading can be believed at all. An empty list of connections from a
+machine that is hiding its socket tables looks exactly like an idle
+machine, and that difference is the whole point — see **When it cannot
+see** below.
+
+### The graphical side
+
+The canvas is a fork of [CORE](https://github.com/coreemu/core), driven
+from the same JSON: your real programs as nodes, each linked to the
+machine its traffic leaves through. It runs in a container that never
+touches the host's networking — `scripts/core-lab/` has the recipe and
+the reasons.
 
 ### Requirements
 
@@ -91,31 +108,12 @@ connection that was already open is excluded on purpose, so it survives
 whether the policy is right or catastrophic. `--verify host:port` makes
 the tool do this for you and undo immediately if it fails.
 
-### Doing it from the page
+### Doing it from the canvas
 
-The buttons work, behind a token. `tl-serve` prints one at startup, on
-the terminal you started it from and nowhere else:
-
-```
-throughline: http://127.0.0.1:7644  (loopback only)
-  to change routing from the browser, paste this once: 9f3c…
-```
-
-Paste it once and *Apply now*, *Keep it* and *Undo* do what they say.
-
-That is the whole claim of the token, and it is worth being precise
-about: it is not a password. Anyone who can read that terminal can
-already run `tl-plan` themselves. It is proof that the request came from
-the person at the machine rather than from a page that merely reached the
-server — because reading every process's sockets means this runs as root,
-and a browser can be induced to treat a loopback server as same-origin. A
-`Host` check is enough for reading. It is not enough for rewriting the
-machine's routing.
-
-From the page the countdown is not optional and cannot be set below 30
-seconds. At a terminal, "no countdown" is a considered decision about a
-machine you can reach another way; in a browser it is a checkbox somebody
-clicks past.
+Not yet. The browser UI that used to live here has been removed — it was
+the wrong shape (see DESIGN.md), and leaving it in the repository would
+invite somebody to run it. Applying is done at a terminal, with
+`tl-plan`, which is the path the 39 namespace cases actually exercise.
 
 ## Is this safe to run?
 
@@ -320,39 +318,16 @@ behind.
 Your own machine is never touched. Each namespace has its own nftables,
 ip rules and routing tables, and destroying it destroys them.
 
-And the browser path, end to end — *Apply now* pressed in a real browser,
-against a `tl-serve` running inside the namespace, asserting that real
-traffic changed direction and that *Undo* put it back:
-
-```bash
-node scripts/browser-apply-test.mjs http://127.0.0.1:7645/ <token>
-```
-
 Running real traffic through generated rulesets is how three bugs were
 found that every unit test had passed — see the commit history for
 `ct mark`, `masquerade` and `rp_filter`.
 
-## Verifying the UI
+## Looking at the canvas without a display
 
-```
-node scripts/verify-gui.mjs http://127.0.0.1:7644/ /tmp/shot
-```
-
-Drives a real browser and asserts what a person would see, at three
-widths: no sideways scroll, no cell past the panel edge, no truncated
-detail, every lane populated, no console errors — and, the one that
-matters, that clicking a node lights **exactly** the destinations that
-node's flows actually reached, checked against `/api/snapshot`.
-
-That last check is not decoration. An earlier version followed graph
-edges forward from the shared interface node, so clicking one process lit
-16 destinations when it had touched 3, two of them Tor relays that only
-`tor` talks to. A check against the page's own data structures would have
-passed while the screen lied; this one reads the rendered DOM.
-
-Playwright is not vendored (this repo has no dependencies). Run from a
-directory whose `node_modules` has it, or set `TL_PLAYWRIGHT` to any
-`package.json` whose tree does.
+`scripts/core-lab/` builds CORE and Throughline's bridge in a container,
+starts them under Xvfb, and writes a PNG. That is how the GUI is checked
+on a headless machine, and how the screenshots in the commit history were
+made. It asserts the evidence survives a save before it draws anything.
 
 ## Layout
 
@@ -363,7 +338,8 @@ crates/tl-inventory   parsing and attribution, no dependencies
   ports.rs            the kernel's ephemeral range
   services.rs         the host's /etc/services
   snapshot.rs         Flow, Direction, Listeners, LocalService, JSON
-crates/tl-serve       std-only HTTP on loopback + the UI
+  visibility.rs       whether this process can see the machine at all
+  bin/tl-observe.rs   print it as JSON and exit -- the seam a UI reads
 ```
 
 No third-party crates anywhere. A program that reads every socket on the
@@ -375,14 +351,12 @@ tool also works against a container's bound `/proc` or a captured tree.
 ## Changing where traffic goes
 
 
-The second tab is a policy editor. Drag a program into a box — Straight
-out, Through the VPN, Through Tor, Tor through the VPN — or click the
-program and then the box, which is the same thing without a mouse. The
-screen says what each choice means in a sentence, and an expander shows
-the exact ruleset for anyone who wants to read it before believing it.
+`tl-plan` compiles a policy — Straight out, Through the VPN, Through Tor,
+Tor through the VPN — into text you can read before believing it: an
+nftables ruleset, `ip` commands, and the torrc lines Tor would need.
 
-Nothing is applied. The editor produces text: an nftables ruleset, `ip`
-commands, and the torrc lines Tor would need.
+Compiling is not applying. `--apply` is a separate, deliberate step, and
+it undoes itself unless confirmed.
 
 ### What it refuses to produce
 
