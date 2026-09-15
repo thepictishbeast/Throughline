@@ -202,10 +202,15 @@ fn handle(mut stream: TcpStream, gate: &gate::Gate) -> std::io::Result<()> {
             let flows = snapshot::collect(Path::new(&proc_root));
             let names = ServiceNames::load(Path::new(&services));
             let ports = EphemeralPorts::load(Path::new(&proc_root));
+            // Never hand back a list of connections without saying
+            // whether this process could see any.
+            let attributed = flows.iter().filter(|f| f.holder.is_some()).count();
+            let sight =
+                tl_inventory::visibility::assess(Path::new(&proc_root), flows.len(), attributed);
             (
                 "200 OK",
                 "application/json; charset=utf-8",
-                snapshot::to_json(&flows, &names, ports),
+                snapshot::to_json(&flows, &names, ports, &sight),
             )
         }
         "/api/host" => {

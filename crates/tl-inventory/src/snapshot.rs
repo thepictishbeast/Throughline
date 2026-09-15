@@ -12,6 +12,7 @@ use crate::ports::EphemeralPorts;
 use crate::proc_net::{Proto, Socket, State, parse_table};
 use crate::procs::{Holder, Owner, holders_by_inode};
 use crate::services::ServiceNames;
+use crate::visibility::Visibility;
 
 /// A socket plus who owns it.
 #[derive(Debug, Clone)]
@@ -386,11 +387,34 @@ fn esc(s: &str) -> String {
     o
 }
 
-/// Render flows as JSON for the UI.
+/// Render flows as JSON for a front end.
+///
+/// The visibility assessment is a REQUIRED argument rather than an
+/// optional extra, because the failure this crate exists to avoid is
+/// exactly the one where an empty list is rendered as a fact. A caller
+/// that cannot be bothered to check the instrument cannot get the
+/// readings either.
 #[must_use]
-pub fn to_json(flows: &[Flow], names: &ServiceNames, ports: EphemeralPorts) -> String {
+pub fn to_json(
+    flows: &[Flow],
+    names: &ServiceNames,
+    ports: EphemeralPorts,
+    sight: &Visibility,
+) -> String {
     let listening = &Listeners::from_flows(flows, ports);
-    let mut s = String::from("{\"flows\":[");
+    let mut s = format!(
+        "{{\"visibility\":{{\"sight\":\"{}\",\"trustworthy\":{},\"headline\":\"{}\",\
+         \"evidence\":\"{}\",\"remedy\":{},\"android\":{}}},\"flows\":[",
+        sight.sight.tag(),
+        sight.sight.can_be_trusted(),
+        esc(&sight.headline()),
+        esc(&sight.evidence),
+        sight
+            .remedy
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), |r| format!("\"{}\"", esc(r))),
+        sight.android,
+    );
     for (i, f) in flows.iter().enumerate() {
         if i > 0 {
             s.push(',');
@@ -457,7 +481,19 @@ pub fn by_kind(flows: &[Flow]) -> HashMap<&'static str, usize> {
 mod tests {
     use super::*;
     use crate::proc_net::Proto;
+    use crate::visibility::{Sight, Visibility};
     use std::net::Ipv4Addr;
+
+    /// A "we could see fine" assessment, so a test about flows is about
+    /// flows. The cases that care about the instrument say so.
+    fn seeing() -> Visibility {
+        Visibility {
+            sight: Sight::Full,
+            evidence: "test fixture".to_owned(),
+            remedy: None,
+            android: false,
+        }
+    }
 
     /// The kernel default, so a test does not depend on the host it runs on.
     const EP: EphemeralPorts = EphemeralPorts {
@@ -524,7 +560,7 @@ mod tests {
             }),
             owner: Owner::Process,
         };
-        let j = to_json(&[f], &ServiceNames::default(), EP);
+        let j = to_json(&[f], &ServiceNames::default(), EP, &seeing());
         assert!(j.contains(r#"\"name\\with\nnewline"#), "{j}");
         assert_eq!(j.matches("\"actor\"").count(), 1);
     }
@@ -637,7 +673,7 @@ mod tests {
             at("203.0.113.7", 443, "198.51.100.24", State::Established),
             at("203.0.113.7", 55372, "1.1.1.1", State::Established),
         ];
-        let j = to_json(&flows, &ServiceNames::default(), EP);
+        let j = to_json(&flows, &ServiceNames::default(), EP, &seeing());
         assert_eq!(j.matches("\"dir\":\"inbound\"").count(), 1, "{j}");
         assert_eq!(j.matches("\"dir\":\"outbound\"").count(), 1, "{j}");
         assert_eq!(j.matches("\"dir\":\"listening\"").count(), 1, "{j}");
@@ -790,7 +826,7 @@ mod tests {
             "sshd",
             Owner::Service("ssh".to_owned()),
         )];
-        let j = to_json(&flows, &names, EP);
+        let j = to_json(&flows, &names, EP, &seeing());
         assert!(j.contains(r#""service":"ssh""#), "{j}");
         assert!(j.contains(r#""actor":"sshd (ssh)""#), "{j}");
         assert!(j.contains(r#""forwards":false"#), "{j}");
@@ -812,7 +848,7 @@ mod tests {
             }),
             owner: Owner::Process,
         };
-        let j = to_json(&[f], &ServiceNames::default(), EP);
+        let j = to_json(&[f], &ServiceNames::default(), EP, &seeing());
         assert!(!j.contains('\u{202e}'), "raw override reached the UI");
         assert!(j.contains("\\u202e"), "{j}");
         // Zero-width characters hide a difference between two names.
@@ -880,8 +916,35 @@ mod tests {
     #[test]
     fn an_empty_snapshot_is_still_valid_json() {
         assert_eq!(
-            to_json(&[], &ServiceNames::default(), EP),
-            "{\"flows\":[],\"services\":[]}"
+            to_json(&[], &ServiceNames::default(), EP, &seeing()),
+            "{\"visibility\":{\"sight\":\"full\",\"trustworthy\":true,\
+             \"headline\":\"reading this machine\",\"evidence\":\"test fixture\",\
+             \"remedy\":null,\"android\":false},\"flows\":[],\"services\":[]}"
         );
+    }
+
+    #[test]
+    fn an_empty_snapshot_from_a_blind_process_says_so_in_the_document() {
+        // The Termux failure, pinned at the layer a front end reads.
+        // Both documents have `"flows":[]`; only one of them means the
+        // machine is quiet, and the difference must be in the bytes --
+        // not in a log line, not in an exit status a GUI never sees.
+        let blind = Visibility {
+            sight: Sight::TablesWithheld,
+            evidence: "3 interface(s) carried packets".to_owned(),
+            remedy: Some("run it as root".to_owned()),
+            android: true,
+        };
+        let j = to_json(&[], &ServiceNames::default(), EP, &blind);
+        assert!(j.contains("\"sight\":\"tables-withheld\""), "{j}");
+        assert!(j.contains("\"trustworthy\":false"), "{j}");
+        assert!(j.contains("CANNOT SEE"), "{j}");
+        assert!(j.contains("\"android\":true"), "{j}");
+        assert!(j.contains("\"flows\":[]"));
+        // And the quiet machine's document differs, at the field that
+        // decides it, from the blind one's.
+        let quiet = to_json(&[], &ServiceNames::default(), EP, &seeing());
+        assert!(quiet.contains("\"trustworthy\":true"));
+        assert_ne!(quiet, j, "a blind reading must not render as a quiet one");
     }
 }

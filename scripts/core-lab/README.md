@@ -36,6 +36,38 @@ screenshot to `/out`. That is how the GUI gets looked at without a
 display attached, and it is the same method the Rust side uses to assert
 on rendered pixels rather than on a widget tree.
 
+## Drawing a real machine on it
+
+`bridge.py` takes `tl-observe` output and creates CORE nodes from it over
+the same gRPC API the GUI uses. This is the thing no other simulator
+does: every node on the canvas stands for a program that is running on a
+real machine right now, and the link to `thismachine` is the claim that
+its traffic leaves that way.
+
+```sh
+tl-observe > out/observed.json                 # on the machine being read
+docker run --rm --network none \
+  --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+  -v "$PWD/out:/out" tl-corelab /run-bridge.sh # here
+```
+
+It refuses to draw anything if `visibility.trustworthy` is false. A
+machine that is withholding its socket tables must never be rendered as
+a machine with nothing running — that is the Termux failure, and it is
+refused here as well as in the core.
+
+### The first change to CORE, and what it cost to find
+
+CORE labels both ends of every link with the addresses it invented for
+the lab. When the nodes are real programs those addresses are fiction,
+and they cover the one label that is true. The Dockerfile turns them off.
+
+It takes **two** edits, not one: `graph/manager.py` sets the defaults in
+its constructor and then sets them **back to `True`** in the reset that
+runs when a session is joined. Changing only the constructor looks
+correct, applies cleanly, and does nothing at all — which is worth
+knowing before a larger change is attempted on this codebase.
+
 ## What this build had to work around, all of it upstream
 
 CORE's last commit on its default branch is 2025-05-19. None of the

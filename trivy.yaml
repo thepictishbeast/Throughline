@@ -1,0 +1,6 @@
+# Trivy reads this automatically when run from the repo root, which is
+# how the gate runs it. Its only job is to point at the scoped ignore
+# file: a bare .trivyignore is picked up automatically but cannot name a
+# path, and switching a rule off for the whole repository would mean the
+# next Dockerfile that runs as root passes in silence.
+ignorefile: .trivyignore.yaml

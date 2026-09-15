@@ -1,0 +1,16 @@
+# Findings that are understood and accepted, with the reason. An entry
+# here is a decision that outlives whoever made it, so each one names
+# the path it applies to rather than switching a rule off everywhere.
+misconfigurations:
+  - id: DS-0002
+    paths:
+      - "scripts/core-lab/Dockerfile"
+    statement: >-
+      CORE's daemon creates network namespaces and bind-mounts node
+      filesystems, which requires CAP_SYS_ADMIN in the daemon process.
+      The daemon is Python, and an interpreter cannot carry file
+      capabilities, so no non-root user can do this work. The isolation
+      is supplied by how the container is RUN instead: --network none,
+      two capabilities, no host mounts, never --privileged. The whole
+      point of this container is to keep that root daemon off a real
+      host.

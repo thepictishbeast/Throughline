@@ -43,6 +43,21 @@ impl Sight {
     pub const fn can_be_trusted(self) -> bool {
         matches!(self, Self::Full | Self::OwnProcessOnly)
     }
+
+    /// A stable name for a machine to switch on.
+    ///
+    /// Separate from the headline, which is a sentence for a person and
+    /// may be reworded. A front end that branches on prose is a front
+    /// end that breaks when the prose improves.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::OwnProcessOnly => "own-process-only",
+            Self::TablesWithheld => "tables-withheld",
+            Self::NoProcNet => "no-proc-net",
+        }
+    }
 }
 
 /// What the instrument check found.
